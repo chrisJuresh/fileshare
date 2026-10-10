@@ -96,14 +96,21 @@ docker compose exec restic restic ls <snapshot-id> "/data/library/<item name>"
 
 ### Restore a single item
 
-Restore into an empty directory that `PUID` can write, using a one-off restic container (no
-network, read-only repo access is enough):
+Restore with a one-off restic container (no network) into a directory on the data disk, which has
+room for the item and is writable by `PUID` (`/srv` itself is root-owned, and a root-created
+directory isn't writable by the container). The repository is mounted read-only for the restore;
+restic then needs `--no-lock`. Without a lock a concurrent `forget --prune` could remove data the
+restore still reads, so don't run it during the weekly forget (Sunday 14:00) or stop the runner
+first (`docker compose stop restic`).
 
 ```bash
-mkdir -p /srv/fileshare-restore
-docker compose run --rm --no-deps -v /srv/fileshare-restore:/restore restic \
-  restic restore latest --target /restore --include "/data/library/<item name>"
-ls -la "/srv/fileshare-restore/data/library/<item name>"
+envv() { grep -E "^$1=" .env | tail -n 1 | cut -d= -f2- | tr -d "\"'"; }   # value from .env
+DATA_ROOT=$(envv DATA_ROOT); APPDATA=$(envv APPDATA); RESTIC_REPO_HOST=$(envv RESTIC_REPO_HOST)
+install -d -m 0750 "$DATA_ROOT/restore"            # must be empty
+docker compose run --rm --no-deps \
+  -v "$DATA_ROOT/restore:/restore" -v "$RESTIC_REPO_HOST:/restic:ro" restic \
+  restic restore latest --no-lock --target /restore --include "/data/library/<item name>"
+ls -la "$DATA_ROOT/restore/data/library/<item name>"
 ```
 
 Then either:
@@ -120,6 +127,7 @@ Then either:
   content (and therefore every piece hash) is identical.
 
 Use `<snapshot-id>` instead of `latest` for an older version (`restic snapshots` lists them).
+Delete the restore directory when done: `rm -rf "$DATA_ROOT/restore"`.
 
 ### Full restore (lost data disk or new server)
 
@@ -127,27 +135,44 @@ Use `<snapshot-id>` instead of `latest` for an older version (`restic snapshots`
 2. Recreate the directories (`scripts/init-dirs.sh`). Put the restic password from your password
    manager into `${APPDATA}/secrets/restic-password` (mode 600). Mount or copy the repository to
    `${RESTIC_REPO_HOST}`.
-3. Restore everything into a staging directory:
+3. Restore everything into a staging directory on the data disk (needs free space for the whole
+   library; `envv` as in "Restore a single item"; the stack is stopped, so `--no-lock` is safe):
    ```bash
-   mkdir -p /srv/fileshare-restore
-   docker compose run --rm --no-deps -v /srv/fileshare-restore:/restore restic \
-     restic restore latest --target /restore
+   DATA_ROOT=$(envv DATA_ROOT); APPDATA=$(envv APPDATA); RESTIC_REPO_HOST=$(envv RESTIC_REPO_HOST)
+   install -d -m 0750 "$DATA_ROOT/restore"
+   docker compose run --rm --no-deps \
+     -v "$DATA_ROOT/restore:/restore" -v "$RESTIC_REPO_HOST:/restic:ro" restic \
+     restic restore latest --no-lock --target /restore
    ```
 4. Put things back (as `PUID`):
    ```bash
-   R=/srv/fileshare-restore
-   cp -a "$R/data/library/." /srv/fileshare-data/library/
-   cp -a "$R/state/backup/fileshare.db" /srv/appdata/fileshare/app/fileshare.db
-   rm -f /srv/appdata/fileshare/app/fileshare.db-wal /srv/appdata/fileshare/app/fileshare.db-shm
-   cp -a "$R/secrets/." /srv/appdata/fileshare/secrets/          # restic-password is not in it
-   cp -a "$R/syncthing-config/." /srv/appdata/fileshare/syncthing/
-   diff "$R/config/.env" .env                                     # reconcile by hand
+   R="$DATA_ROOT/restore"
+   cp -a "$R/data/library/." "$DATA_ROOT/library/"
+   cp -a "$R/state/backup/fileshare.db" "$APPDATA/app/fileshare.db"
+   rm -f "$APPDATA/app/fileshare.db-wal" "$APPDATA/app/fileshare.db-shm"
+   cp -a "$R/secrets/." "$APPDATA/secrets/"                 # restic-password is not in it
+   cp -a "$R/syncthing-config/." "$APPDATA/syncthing/"
+   diff "$R/config/.env" .env                                # reconcile by hand
    ```
-   The Syncthing database is not backed up. Syncthing rebuilds it with a rescan, and the device
-   identity (`cert.pem`/`key.pem`) is restored, so the PC reconnects without re-pairing.
-5. `docker compose up -d`, then check the dashboard: items `ready`, active shares seeding
-   (the app recreates `/state/seedlinks` for active shares).
-6. Remove `/srv/fileshare-restore` when done.
+   The staging directory is on the same disk, so `mv` instead of `cp -a` for the library avoids
+   needing the space twice (at the cost of no second copy until the stack is verified). The
+   Syncthing database is not backed up. Syncthing rebuilds it with a
+   rescan, and the device identity (`cert.pem`/`key.pem`) is restored, so the PC reconnects without
+   re-pairing.
+5. `docker compose up -d`, then check the dashboard: active shares seeding (the app recreates
+   `/state/seedlinks` for active shares) and items `ready`, with one expected exception. The DB copy
+   in a snapshot is taken just before that backup runs, so items whose ingest that same backup
+   completed come back as **`snapshotting`**. No action is needed: the restic runner marks the
+   restored `running` backup row as failed ("runner restarted while running") and re-queues its
+   requests; because they are old, the next backup starts as soon as the runner is up (outside the
+   pause window). It lists those items in the library, and the app then marks them `ready` (their
+   outbox entries are already gone, which counts as handled). They can be shared once `ready`.
+   Other states after a restore:
+   - `stabilising` items whose outbox entry is gone are marked deleted ("outbox entry disappeared
+     before ingest"). Anything still in the PC's outbox syncs back and is ingested as a new item.
+   - If the PC still has a copy of a `snapshotting` item, that item goes to `error` ("outbox copy
+     changed after ingest; not removed"): delete the copy on the PC, then **Retry** the item.
+6. Remove the staging directory when done: `rm -rf "$DATA_ROOT/restore"`.
 
 ### Check, locks, repair
 
