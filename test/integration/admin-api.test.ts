@@ -1,5 +1,4 @@
 // Admin API routes: validation, error mapping and DTO shapes (fake ingest/p2p, synthetic data).
-import bencodeUntyped from 'bencode';
 import { writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -9,7 +8,9 @@ import { setSetting } from '../../src/db/index.js';
 import type { ItemDto, ShareDto, SettingsDto, StatsDto, StatusDto } from '../../src/types.js';
 import { ADMIN_ORIGIN, type Harness, insertItem, insertShare, type Jwks, signToken, startAdmin, startJwks } from './admin-helpers.js';
 
-const bencode = bencodeUntyped as { encode(v: unknown): Uint8Array };
+// bencode 4 ships no types; load it untyped.
+const bencodeSpec: string = 'bencode';
+const bencode = ((await import(bencodeSpec)) as { default: { encode(v: unknown): Uint8Array } }).default;
 
 let jwks: Jwks;
 let h: Harness;
