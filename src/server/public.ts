@@ -28,7 +28,7 @@ export async function buildPublicServer(ctx: AppContext, p2p: P2PService): Promi
   await app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
 
   const webRoot = path.join(config.paths.web, 'recipient');
-  await app.register(fastifyStatic, { root: webRoot, prefix: '/assets/', serve: true, index: false, maxAge: '7d', immutable: true, wildcard: true, decorateReply: true });
+  await app.register(fastifyStatic, { root: path.join(webRoot, 'assets'), prefix: '/assets/', serve: true, index: false, maxAge: '7d', immutable: true, wildcard: true, decorateReply: true });
   await app.register(fastifyStatic, { root: path.join(webRoot, 'vendor'), prefix: '/vendor/', index: false, maxAge: '1d', decorateReply: false });
 
   app.get('/healthz', async () => ({ ok: true }));
