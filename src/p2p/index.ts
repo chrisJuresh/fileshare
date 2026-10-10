@@ -8,16 +8,16 @@ import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Transform } from 'node:stream';
 import type { AppContext } from '../context.js';
-import { getSetting } from '../db/index.js';
+import { CAP_KEYS, effectiveCapBps } from '../core/upload-cap.js';
 import type { ShareDto, SwarmSnapshot } from '../types.js';
 import { Limiter } from './limiter.js';
-import { DEFAULT_UNLOCK_LIMITS, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
+import { DEFAULT_UNLOCK_LIMITS, RecentOnce, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
 import { registerShareApi } from './routes.js';
 import { internalAnnounceHost, Seeder } from './seeder.js';
 import { P2PError, shareState, ShareStore, type ArgonOptions } from './shares.js';
 import { SwarmStats, type SwarmTimings } from './swarm.js';
-import { scrub, TrackerService } from './tracker.js';
-import { registerWebseed } from './webseed.js';
+import { scrub, TrackerService, type TrackerOptions } from './tracker.js';
+import { registerWebseed, type WebseedControl } from './webseed.js';
 
 export { P2PError } from './shares.js';
 
@@ -36,6 +36,8 @@ export interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;
+  /** Clear the unlock failure counters of a share (admin "reset limits"). */
+  resetUnlockLimits(id: string): void;
   getShare(id: string): ShareDto | undefined;
   listShares(): ShareDto[];
   swarm(shareId: string): SwarmSnapshot | undefined;
@@ -57,9 +59,12 @@ export interface P2POptions {
   live?: Partial<SwarmTimings>;
   /** Webseed: drop responses whose socket made no progress for this long (default 60 s). */
   webseedIdleMs?: number;
+  /** Tracker abuse limits (tests); defaults in tracker.ts. */
+  trackerLimits?: Pick<TrackerOptions, 'announceLimit' | 'maxWsPerShare' | 'maxWsTotal'>;
 }
 
-export const CAP_SETTING = 'upload.cap_bps';
+/** At most one `unlocked` share event per (share, client IP) in this window. */
+export const UNLOCK_EVENT_TTL_MS = 10 * 60_000;
 
 export class P2P implements P2PService {
   readonly limiter = new Limiter();
@@ -67,6 +72,7 @@ export class P2P implements P2PService {
   readonly tracker: TrackerService;
   readonly stats: SwarmStats;
   readonly unlockLimiter: UnlockRateLimiter;
+  readonly unlockEvents = new RecentOnce(UNLOCK_EVENT_TTL_MS);
   seeder: Seeder | undefined;
 
   private readonly internalSecret = randomBytes(18).toString('base64url');
@@ -75,6 +81,7 @@ export class P2P implements P2PService {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly log;
   private app: FastifyInstance | undefined;
+  private webseed: WebseedControl | undefined;
   private started = false;
   private listening = false;
 
@@ -91,6 +98,7 @@ export class P2P implements P2PService {
       onAnnounce: (a) => this.stats.onAnnounce(a),
       announceIp: ctx.config.env.WEBRTC_ANNOUNCE_IP.trim(),
       webrtcPort: ctx.config.env.WEBRTC_PORT,
+      ...opts.trackerLimits,
     });
     this.stats = new SwarmStats(ctx, {
       shares: this.shares,
@@ -103,9 +111,9 @@ export class P2P implements P2PService {
 
   async registerPublicRoutes(app: FastifyInstance): Promise<void> {
     this.app = app;
-    await registerShareApi(app, this.ctx, { shares: this.shares, unlockLimiter: this.unlockLimiter });
+    await registerShareApi(app, this.ctx, { shares: this.shares, unlockLimiter: this.unlockLimiter, unlockEvents: this.unlockEvents });
     await this.tracker.register(app);
-    await registerWebseed(app, this.ctx, {
+    this.webseed = await registerWebseed(app, this.ctx, {
       shares: this.shares,
       limiter: this.limiter,
       onBytes: (id, n) => this.stats.addWebseed(id, n),
@@ -119,9 +127,10 @@ export class P2P implements P2PService {
     });
   }
 
+  /** Same effective cap the dashboard shows (core/upload-cap.ts); 0 = none configured = unlimited. */
   private applyCap(): void {
-    const v = getSetting<unknown>(this.ctx.db, CAP_SETTING);
-    this.limiter.setRate(typeof v === 'number' ? v : Number.POSITIVE_INFINITY);
+    const cap = effectiveCapBps(this.ctx.db);
+    this.limiter.setRate(cap > 0 ? cap : Number.POSITIVE_INFINITY);
     this.log.info({ capBps: this.limiter.rate() }, 'upload cap applied');
   }
 
@@ -131,7 +140,7 @@ export class P2P implements P2PService {
     this.applyCap();
     this.unsubs.push(
       this.ctx.events.on('settings.changed', ({ key }) => {
-        if (key === CAP_SETTING) this.applyCap();
+        if (CAP_KEYS.includes(key)) this.applyCap();
       }),
       this.ctx.events.on('share.changed', ({ shareId }) => void this.reconcile(shareId)),
     );
@@ -165,7 +174,11 @@ export class P2P implements P2PService {
     every(this.opts.sweepIntervalMs ?? 30_000, () => this.sweep());
     every(this.opts.flushIntervalMs ?? 10_000, () => this.stats.flush());
     every(this.opts.tickIntervalMs ?? 1_500, () => this.stats.tick(this.seeder?.shareIds() ?? []));
-    every(60_000, () => this.unlockLimiter.prune());
+    every(60_000, () => {
+      this.unlockLimiter.prune();
+      this.unlockEvents.prune();
+      this.tracker.announceLimiter.prune();
+    });
   }
 
   async stop(): Promise<void> {
@@ -218,11 +231,13 @@ export class P2P implements P2PService {
     if (shareState(row, Date.now()) === 'active') {
       this.tracker.closeStale(row.id, row.token_version);
       this.stats.closeStale(row.id, row.token_version);
+      this.webseed?.closeStale(row.id, row.token_version);
       if (this.seeder && this.started && (this.listening || this.app?.server.listening)) {
         await this.shares.ensureSeedlink(row);
         await this.seeder.ensure(row);
       }
     } else {
+      this.webseed?.closeShare(row.id);
       await this.seeder?.remove(row.id);
       this.tracker.dropShare(row.id, row.info_hash);
       this.stats.closeShare(row.id, 4404);
@@ -264,10 +279,17 @@ export class P2P implements P2PService {
       this.ctx.events.emit('share.changed', { shareId: id, reason: 'revoked' });
       await this.reconcile(id);
     }
+    // The item's files are about to be deleted: end every in-flight webseed response for it, also
+    // for shares that were already inactive (e.g. expired but not yet swept).
+    for (const r of this.shares.allRows()) if (r.item_id === itemId) this.webseed?.closeShare(r.id);
   }
 
   async repointItem(itemId: string): Promise<void> {
     await this.shares.repointItem(itemId);
+  }
+
+  resetUnlockLimits(id: string): void {
+    this.unlockLimiter.resetShare(id);
   }
 
   getShare(id: string): ShareDto | undefined {

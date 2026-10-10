@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { requestSnapshot } from '../backup/queue.js';
 import type { AppContext } from '../context.js';
 import { NameError, validateSegment } from '../core/paths.js';
+import { isNameTaken } from '../ingest/naming.js';
 import type { ShareRow } from '../db/index.js';
 import type { ShareDto } from '../types.js';
 import { filesFromInfo, getItemRow, listItems } from './dto.js';
@@ -90,8 +91,7 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     const item = getItemRow(db, id);
     if (!item) throw new HttpError(404, 'not_found');
     if (item.name === name) return { ok: true };
-    const clash = db.prepare(`SELECT id FROM items WHERE name = ? AND id != ? AND status != 'deleted'`).get(name, id);
-    if (clash) throw new HttpError(409, 'name_taken', 'an item with that name already exists');
+    if (await isNameTaken(db, ctx.config.paths.library, name, id)) throw new HttpError(409, 'name_taken', 'an item with that name already exists');
     await ingest.renameItem(id, name);
     return { ok: true };
   });
@@ -160,6 +160,15 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     const row = shareRow(ctx, id);
     if (!row) throw new HttpError(404, 'not_found');
     if (row.revoked_at === null) await p2p.revokeShare(id);
+    return { ok: true };
+  });
+
+  api.post('/shares/:id/reset-limits', async (req) => {
+    const { id } = parse(idParam, req.params);
+    parse(EmptyBody, req.body ?? undefined);
+    if (!shareRow(ctx, id)) throw new HttpError(404, 'not_found');
+    p2p.resetUnlockLimits(id);
+    req.log.info({ admin: req.adminEmail ? 'yes' : 'service' }, 'admin: share unlock limits reset');
     return { ok: true };
   });
 

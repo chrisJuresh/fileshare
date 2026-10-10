@@ -1,5 +1,33 @@
 // Library name allocation (docs/ARCHITECTURE.md §4 hashing step 1, §9 names).
+import { lstat } from 'node:fs/promises';
+import { safeJoin } from '../core/paths.js';
+import type { Db } from '../db/index.js';
+
 const MAX_NAME_BYTES = 200;
+
+/**
+ * The name a deleted item's row keeps, so its real name is free again (items.name is UNIQUE across
+ * all rows). Never a valid live name collision in practice: it embeds the item's random id.
+ */
+export function tombstoneName(name: string, itemId: string): string {
+  return `${name} [deleted ${itemId}]`;
+}
+
+/**
+ * THE rule for "is this library name in use?", shared by ingest (allocation, rename) and the admin
+ * API: an item row other than `exceptItemId` has it (deleted rows hold tombstone names, so they never
+ * block), or something already exists at /data/library/<name>.
+ */
+export async function isNameTaken(db: Db, libraryDir: string, name: string, exceptItemId?: string): Promise<boolean> {
+  if (db.prepare('SELECT 1 FROM items WHERE name = ? AND id != ?').get(name, exceptItemId ?? '')) return true;
+  try {
+    await lstat(safeJoin(libraryDir, name));
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
 
 function pad(n: number, w = 2): string {
   return String(n).padStart(w, '0');

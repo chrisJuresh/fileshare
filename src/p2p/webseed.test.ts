@@ -212,6 +212,70 @@ describe('webseed', () => {
     }
   });
 
+  /** Start a throttled download and resolve once the first bytes arrived; `ended` settles when the body stops. */
+  async function slowDownload(url: string): Promise<{ ended: Promise<'done' | 'cut'>; received: () => number }> {
+    let got = 0;
+    const r = await fetch(url);
+    expect(r.status).toBe(200);
+    const reader = r.body!.getReader();
+    const first = await reader.read();
+    got += first.value?.length ?? 0;
+    const ended = (async (): Promise<'done' | 'cut'> => {
+      try {
+        for (;;) {
+          const c = await reader.read();
+          if (c.done) return 'done';
+          got += c.value.length;
+        }
+      } catch {
+        return 'cut';
+      }
+    })();
+    return { ended, received: () => got };
+  }
+
+  it('revoking a share ends its in-flight webseed responses promptly', async () => {
+    const big = await makeItem(env.ctx, 'revoke-me', [{ rel: 'big.bin', size: 4 * 1024 * 1024 }]);
+    const s = await p2p.createShare({ itemId: big.id });
+    const t = p2p.shares.token(p2p.shares.getRow(s.id)!);
+    p2p.limiter.setRate(64 * 1024); // the full body would take ~60 s
+    try {
+      const dl = await slowDownload(`${srv.base}/ws/${t}/revoke-me/big.bin`);
+      const t0 = Date.now();
+      await p2p.revokeShare(s.id);
+      expect(await dl.ended).toBe('cut');
+      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(dl.received()).toBeLessThan(4 * 1024 * 1024);
+    } finally {
+      p2p.limiter.setRate(Number.POSITIVE_INFINITY);
+    }
+  });
+
+  it('a password change ends responses that used the old token, deleting the item ends the rest', async () => {
+    const big = await makeItem(env.ctx, 'rekey-me', [{ rel: 'big.bin', size: 4 * 1024 * 1024 }]);
+    const s = await p2p.createShare({ itemId: big.id });
+    const t1 = p2p.shares.token(p2p.shares.getRow(s.id)!);
+    p2p.limiter.setRate(64 * 1024);
+    try {
+      const old = await slowDownload(`${srv.base}/ws/${t1}/rekey-me/big.bin`);
+      await p2p.updateShare(s.id, { password: 'new synthetic pw' });
+      expect(await old.ended).toBe('cut');
+      const t2 = p2p.shares.token(p2p.shares.getRow(s.id)!);
+      const cur = await slowDownload(`${srv.base}/ws/${t2}/rekey-me/big.bin`);
+      await new Promise((r) => setTimeout(r, 300));
+      // Same token version: an unrelated reconcile must not cut it.
+      await p2p.reconcile(s.id);
+      const before = cur.received();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(cur.received()).toBeGreaterThan(before);
+      // Item deletion revokes and ends every response for the item.
+      await p2p.revokeAllForItem(big.id);
+      expect(await cur.ended).toBe('cut');
+    } finally {
+      p2p.limiter.setRate(Number.POSITIVE_INFINITY);
+    }
+  });
+
   it('drops a stalled reader (no progress) after the idle timeout', async () => {
     const big = await makeItem(env.ctx, 'stall', [{ rel: 'big.bin', size: 24 * 1024 * 1024 }], { pieceLength: 1024 * 1024 });
     const s = await p2p.createShare({ itemId: big.id });

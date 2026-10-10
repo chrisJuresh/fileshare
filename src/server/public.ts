@@ -7,22 +7,26 @@ import type { AppContext } from '../context.js';
 import { redactUrl } from '../log.js';
 import type { P2PService } from '../p2p/index.js';
 import { publicSecurityHeaders } from './headers.js';
+import { QuietLogController } from './log-controller.js';
 
 export async function buildPublicServer(ctx: AppContext, p2p: P2PService): Promise<FastifyInstance> {
   const { config, log } = ctx;
   const app = Fastify({
     loggerInstance: log.child({ listener: 'public' }) as FastifyBaseLogger,
-    disableRequestLogging: true,
+    // No built-in request lines (full URL + client IP); the onResponse hook below logs a redacted URL.
+    logController: new QuietLogController(),
     trustProxy: config.env.TRUST_PROXY ? ['127.0.0.1', '::1'] : false,
     bodyLimit: 64 * 1024,
-    maxParamLength: 300,
+    routerOptions: { maxParamLength: 300 },
   });
 
   app.addHook('onRequest', async (_req, reply) => {
     publicSecurityHeaders(reply, config.publicHost);
   });
   app.addHook('onResponse', async (req, reply) => {
-    req.log.info({ method: req.method, url: redactUrl(req.url), status: reply.statusCode, ms: Math.round(reply.elapsedTime) }, 'req');
+    // Unmatched paths are arbitrary client input (could carry a share id): don't echo them.
+    const url = req.routeOptions.url === undefined ? '[unmatched]' : redactUrl(req.url);
+    req.log.info({ method: req.method, url, status: reply.statusCode, ms: Math.round(reply.elapsedTime) }, 'req');
   });
 
   await app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });

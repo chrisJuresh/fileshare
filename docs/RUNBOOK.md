@@ -28,7 +28,12 @@ Logs never contain share tokens, passwords, JWTs or peer IP addresses; keep it t
 adding log lines.
 
 Syncthing GUI (rarely needed): `ssh -L 8384:127.0.0.1:8384 <server>`, then open
-http://localhost:8384 locally.
+http://localhost:8384 locally and log in as **`admin`** with the password in
+`${APPDATA}/secrets/syncthing-gui-password` (view it privately: `less <that file>`; never paste it
+into chat or tickets). The GUI is published on loopback only, and the app also runs on the host
+network, so the password is what keeps other local processes out. `scripts/syncthing-init.sh`
+sets it (idempotent; `pair-pc.sh` runs it too) — run it after every deploy. Syncthing stores only a
+bcrypt hash; the app and scripts keep using the API key, which is unaffected.
 
 ### Restart / apply `.env` changes
 
@@ -70,7 +75,9 @@ Dashboard → "Snapshot now", or:
 docker compose exec restic node dist/backup/main.js request
 ```
 
-It runs within ~10 s, unless another job is running or the pause window is active.
+It runs within ~10 s, unless another job is running or the pause window is active. This also
+applies after a failed backup: a manual request skips the failure back-off once (fix the cause
+first; if it fails again, the next automatic retry follows the back-off).
 
 ### List and browse
 
@@ -94,8 +101,12 @@ ls -la "/srv/fileshare-restore/data/library/<item name>"
 
 Then either:
 
-- **Re-ingest it as a new item:** move it into `${DATA_ROOT}/outbox/` (same filesystem) or upload
-  it from the dashboard. It goes through the normal ingest (hash, snapshot) and you share it again.
+- **Bring it back as a new item:** upload it from the dashboard's Upload tab (copy it to a machine
+  with a browser first, e.g. `scp -r`). It goes through the normal ingest (hash, snapshot) and you
+  share it again. **Don't** move it into `${DATA_ROOT}/outbox/`: that is a Send & Receive folder,
+  so Syncthing would first sync the whole item to the PC (ingest waits for the PC to report 100%),
+  and both copies are removed again after the snapshot. There is no CLI to register files placed
+  directly in the library.
 - **Repair a damaged library entry in place** (the item still exists in the dashboard, same name):
   stop the app (`docker compose stop app`), replace `${DATA_ROOT}/library/<item name>` with the
   restored copy (`cp -a`), then `docker compose start app`. Existing shares keep working, because the
@@ -177,6 +188,15 @@ docker compose up -d --force-recreate syncthing app
 shred -u /srv/appdata/fileshare/secrets/syncthing-api-key.old
 ```
 
+### Syncthing GUI password (`syncthing-gui-password`)
+
+```bash
+mv /srv/appdata/fileshare/secrets/syncthing-gui-password{,.old}
+scripts/gen-secrets.sh
+scripts/syncthing-init.sh                   # sets the new password (the old login stops working)
+shred -u /srv/appdata/fileshare/secrets/syncthing-gui-password.old
+```
+
 ### restic password (`restic-password`)
 
 Add a new key, switch to it, then remove the old key:
@@ -224,6 +244,15 @@ find /srv/fileshare-data/outbox -name '.syncthing.*.tmp'
 Common causes: the PC went to sleep or lost Wi-Fi mid-transfer (completion < 100%); a program on
 the PC keeps writing into the folder; `SYNCTHING_PC_DEVICE_ID` is empty or wrong (re-run
 `scripts/pair-pc.sh`); a file is ignored on one side only (the `.stignore` lists must match).
+
+### Recipient locked out of a password share
+
+Wrong passwords are limited to 5 per 10 minutes per recipient and 50 per hour per share (§7.1 in
+ARCHITECTURE). Someone guessing can therefore lock out the real recipient for up to an hour. If
+that happens: Dashboard → Shares → **Reset limits** on that share (or `POST
+/api/admin/shares/<id>/reset-limits`). It clears the counters for every recipient of that share.
+If the guessing continues, change the password (Edit) or revoke the link and create a new one —
+a new link has a new id.
 
 ### Syncthing not connected
 
@@ -283,7 +312,7 @@ browser↔server WebRTC worked with STUN only, and whether `WEBRTC_ANNOUNCE_IP` 
   window is active (`SNAPSHOT_PAUSE_WINDOW`, local `TZ`, plus 15 minutes before it). Requests
   queue up and run after it ends.
 - A failed backup is retried after 5, 10, 20, 40, then every 60 minutes. The error is in
-  `status.error` and in the dashboard.
+  `status.error` and in the dashboard. After fixing the cause, "Snapshot now" retries at once.
 - Exit code 3 ("some files could not be read") outside the library is accepted with a warning;
   inside the library it fails the run, and ingest waits. Fix permissions (everything must be
   readable by `PUID`).

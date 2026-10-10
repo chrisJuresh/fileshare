@@ -221,6 +221,59 @@ describe('ingest pipeline (outbox)', () => {
     await expect(ingest.deleteItem(snap.id)).rejects.toMatchObject({ statusCode: 404 });
     await expect(ingest.retry('nope')).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  it('refuses to delete an outbox item that is not ready (it would be re-ingested); error items once the entry is gone', async () => {
+    // In progress: 409, nothing touched.
+    writeFileSync(path.join(outbox, 'busy.bin'), randomBytes(3000));
+    const busy = await waitStatus('busy.bin', 'snapshotting');
+    await expect(ingest.deleteItem(busy.id)).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/still in the PC outbox/) });
+    expect(itemById(busy.id).status).toBe('snapshotting');
+    expect(existsSync(path.join(library, 'busy.bin'))).toBe(true);
+    expect(existsSync(path.join(outbox, 'busy.bin'))).toBe(true);
+    expect(p2p.revokeAllForItem).not.toHaveBeenCalled();
+
+    // Error item whose outbox entry still exists: 409 too.
+    const { symlinkSync, rmSync } = await import('node:fs');
+    mkdirSync(path.join(outbox, 'Linky'));
+    writeFileSync(path.join(outbox, 'Linky', 'a.bin'), randomBytes(100));
+    symlinkSync('a.bin', path.join(outbox, 'Linky', 'link'));
+    const bad = await waitStatus('Linky', 'error');
+    await expect(ingest.deleteItem(bad.id)).rejects.toMatchObject({ statusCode: 409 });
+    // Removed on the PC → the error item can be deleted, and nothing comes back.
+    rmSync(path.join(outbox, 'Linky'), { recursive: true });
+    await ingest.deleteItem(bad.id);
+    expect(itemById(bad.id).status).toBe('deleted');
+    await sleep(1500);
+    expect(env.ctx.db.prepare("SELECT COUNT(*) AS n FROM items WHERE source_name = 'Linky'").get()).toEqual({ n: 1 });
+  });
+
+  it('a deleted item frees its name for new items and renames', async () => {
+    writeFileSync(path.join(outbox, 'reuse.bin'), randomBytes(2000));
+    const first = await waitStatus('reuse.bin', 'snapshotting');
+    runFakeBackup(env.ctx.db, library, 'ok');
+    await waitStatus('reuse.bin', 'ready');
+    await ingest.deleteItem(first.id);
+    expect(itemById(first.id).name).toBe(`reuse.bin [deleted ${first.id}]`);
+
+    // Same name arrives again: it gets the plain name, not a timestamp suffix.
+    writeFileSync(path.join(outbox, 'reuse.bin'), randomBytes(2100));
+    const second = await waitFor(() => {
+      const r = item('reuse.bin');
+      return r && r.id !== first.id && r.status === 'snapshotting' ? r : undefined;
+    });
+    expect(second.name).toBe('reuse.bin');
+    runFakeBackup(env.ctx.db, library, 'ok');
+    await waitFor(() => itemById(second.id).status === 'ready');
+    await ingest.renameItem(second.id, 'other.bin');
+    await ingest.deleteItem(second.id);
+    // …and a rename may take a deleted item's name too.
+    writeFileSync(path.join(outbox, 'third.bin'), randomBytes(500));
+    const third = await waitStatus('third.bin', 'snapshotting');
+    runFakeBackup(env.ctx.db, library, 'ok');
+    await waitStatus('third.bin', 'ready');
+    await ingest.renameItem(third.id, 'reuse.bin');
+    expect(itemById(third.id).name).toBe('reuse.bin');
+  });
 });
 
 describe('ingest without a PC device id', () => {

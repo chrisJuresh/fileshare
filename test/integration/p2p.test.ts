@@ -292,7 +292,7 @@ describe('p2p end-to-end', () => {
     await httpAnnounce(u.announce.http, share.infoHash, '-qB0000-bbbbbbbbbbbb');
     expect(p2p.tracker.swarm(share.infoHash)).toBeDefined();
     await waitFor(() => p2p.seeder!.torrent(share.id) === undefined, 5000);
-    expect(p2p.tracker.swarm(share.infoHash)).toBeUndefined();
+    await waitFor(() => p2p.tracker.swarm(share.infoHash) === undefined, 2000); // dropped right after unseeding
     expect(p2p.getShare(share.id)!.state).toBe('expired');
   });
 

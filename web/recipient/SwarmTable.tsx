@@ -55,6 +55,10 @@ export function SwarmTable({ swarm, connected }: { swarm: SwarmView | null; conn
           </table>
         </div>
       )}
+      <p class="muted small privacy-note">
+        Downloads are shared directly between the people on this list, so they can see each other's IP
+        address. We never store or show it here.
+      </p>
     </section>
   );
 }

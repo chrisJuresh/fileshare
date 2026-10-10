@@ -6,10 +6,12 @@ import Uppy from '@uppy/core';
 import Dashboard from '@uppy/dashboard';
 import Tus from '@uppy/tus';
 import { useEffect, useRef } from 'preact/hooks';
-import { api, errorMessage } from './api.ts';
+import { api, ApiError, errorMessage } from './api.ts';
 import { useNotify } from './ui.tsx';
 
 const CHUNK = 50 * 1024 * 1024;
+/** The open batch survives reloads: resumed tus uploads keep the batch they were created in. */
+const BATCH_KEY = 'fileshare.upload.batchId';
 const BAD_UPLOAD_CHARS = /[#?%\\\u0000-\u001f\u007f]/;
 
 type Meta = { batchId?: string; relativePath?: string | null; filename?: string; [k: string]: unknown };
@@ -18,6 +20,38 @@ type Meta = { batchId?: string; relativePath?: string | null; filename?: string;
 export function cleanRelativePath(rel: unknown, name: string): string {
   if (typeof rel !== 'string' || rel === '' || rel === 'null') return name;
   return rel.replace(/^\/+/, '');
+}
+
+function storedBatch(): string | null {
+  try {
+    return localStorage.getItem(BATCH_KEY);
+  } catch {
+    return null;
+  }
+}
+function storeBatch(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(BATCH_KEY, id);
+    else localStorage.removeItem(BATCH_KEY);
+  } catch {
+    /* storage unavailable: resumes after a reload may then need a new round */
+  }
+}
+
+/** Reuse the remembered batch while the server still has it open; otherwise start a new one. */
+async function openBatch(): Promise<string> {
+  const remembered = storedBatch();
+  if (remembered && /^[a-z2-7]{26}$/.test(remembered)) {
+    try {
+      const b = await api<{ id: string; status: string }>('GET', `/api/admin/uploads/batches/${remembered}`);
+      if (b.status === 'open') return remembered;
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.status !== 404) throw e;
+    }
+  }
+  const r = await api<{ id: string }>('POST', '/api/admin/uploads/batches');
+  storeBatch(r.id);
+  return r.id;
 }
 
 export function Upload(props: { onItemsChanged: () => void }) {
@@ -64,10 +98,7 @@ export function Upload(props: { onItemsChanged: () => void }) {
     });
 
     uppy.addPreProcessor(async (fileIDs) => {
-      if (!batchId) {
-        const r = await api<{ id: string }>('POST', '/api/admin/uploads/batches');
-        batchId = r.id;
-      }
+      if (!batchId) batchId = await openBatch();
       for (const id of fileIDs) {
         const f = uppy.getFile(id);
         if (!f) continue;
@@ -89,10 +120,16 @@ export function Upload(props: { onItemsChanged: () => void }) {
         try {
           await api('POST', `/api/admin/uploads/batches/${encodeURIComponent(id)}/complete`);
           batchId = null;
+          storeBatch(null);
           uppy.clear();
           notifyRef.current(`Upload complete: ${ok} file${ok === 1 ? '' : 's'} added. They appear in the Library as they are processed.`);
           changedRef.current();
         } catch (e) {
+          // The round can't be completed any more (already added, or unknown): start fresh next time.
+          if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
+            batchId = null;
+            storeBatch(null);
+          }
           notifyRef.current(`Upload finished, but adding it to the library failed: ${errorMessage(e)}`, 'error');
         }
       })();

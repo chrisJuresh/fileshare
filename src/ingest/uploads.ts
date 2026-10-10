@@ -38,10 +38,16 @@ export class UploadsHttpError extends Error {
   constructor(
     readonly statusCode: number,
     message: string,
+    /** Human-readable explanation for the dashboard (sent as `message`). */
+    readonly detail?: string,
   ) {
     super(message);
   }
 }
+
+/** Shown when a (resumed) upload belongs to a batch that was already completed. */
+export const BATCH_CLOSED_MESSAGE =
+  'this upload belongs to an upload round that is already finished; remove the file from the list and add it again';
 
 function metaSegments(meta: Record<string, string | null> | undefined): { batchId: string; segs: string[] } {
   const batchId = meta?.batchId ?? '';
@@ -75,10 +81,12 @@ export async function registerUploadRoutes(app: FastifyInstance, ctx: AppContext
   await mkdirp0750(stagingDir);
 
   const getBatch = db.prepare('SELECT id, status FROM upload_batches WHERE id = ?');
+  // Uploads resume by tus fingerprint with the metadata of the request that CREATED them, so a
+  // finished upload always lands in the batch it was started in; it must still be open.
   const requireOpenBatch = (batchId: string): void => {
     const b = getBatch.get(batchId) as BatchRow | undefined;
     if (!b) throw tusError(404, 'unknown batch');
-    if (b.status !== 'open') throw tusError(409, 'batch is not open');
+    if (b.status !== 'open') throw tusError(409, `batch is not open: ${BATCH_CLOSED_MESSAGE}`);
   };
   const targetPath = (batchId: string, segs: string[]): string => safeJoin(stagingDir, batchId, ...segs);
 
@@ -182,6 +190,14 @@ export async function registerUploadRoutes(app: FastifyInstance, ctx: AppContext
     return reply.code(201).send({ id });
   });
 
+  // The dashboard keeps its batch id across reloads and asks whether it can still add to it.
+  app.get<{ Params: { id: string } }>('/api/admin/uploads/batches/:id', async (req, reply) => {
+    const id = req.params.id;
+    const b = /^[a-z2-7]{26}$/.test(id) ? (getBatch.get(id) as BatchRow | undefined) : undefined;
+    if (!b) return reply.code(404).send({ error: 'not_found' });
+    return reply.send({ id: b.id, status: b.status });
+  });
+
   app.post<{ Params: { id: string } }>('/api/admin/uploads/batches/:id/complete', async (req, reply) => {
     const id = req.params.id;
     if (!/^[a-z2-7]{26}$/.test(id)) return reply.code(404).send({ error: 'not_found' });
@@ -189,7 +205,9 @@ export async function registerUploadRoutes(app: FastifyInstance, ctx: AppContext
       const r = await hooks.completeBatch(id);
       return reply.send(r);
     } catch (err) {
-      if (err instanceof UploadsHttpError) return reply.code(err.statusCode).send({ error: err.message });
+      if (err instanceof UploadsHttpError) {
+        return reply.code(err.statusCode).send({ error: err.message, ...(err.detail ? { message: err.detail } : {}) });
+      }
       throw err;
     }
   });

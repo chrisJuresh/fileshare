@@ -37,6 +37,8 @@ export interface PendingRequests {
   newestAt: number;
   /** At least one request has reason 'manual' (runs without waiting for the debounce). */
   manual: boolean;
+  /** requested_at of the newest pending manual request. */
+  manualNewestAt?: number;
 }
 
 export interface ScheduleState {
@@ -51,6 +53,8 @@ export interface ScheduleState {
   firstRunAt: number | null;
   /** No backup may start before this (failure back-off). */
   backupNotBefore: number;
+  /** started_at of the latest failed backup (null if none). */
+  lastBackupFailedAt?: number | null;
 }
 
 export interface ScheduleConfig {
@@ -96,7 +100,15 @@ export function weeklyDue(
 }
 
 export function backupTrigger(s: ScheduleState, cfg: ScheduleConfig): BackupTrigger | null {
-  if (s.now < s.backupNotBefore) return null;
+  if (s.now < s.backupNotBefore) {
+    // "Snapshot now" after a failure is an explicit retry: a manual request made after the last
+    // failed backup started bypasses the back-off. Only once per request: if that run fails too,
+    // the request is older than the new failure and waits for the back-off like everything else.
+    const p = s.pending;
+    const failedAt = s.lastBackupFailedAt ?? null;
+    if (p?.manual && p.manualNewestAt !== undefined && failedAt !== null && p.manualNewestAt > failedAt) return 'manual';
+    return null;
+  }
   if (s.pending) {
     if (s.pending.manual) return 'manual';
     if (s.now - s.pending.newestAt >= cfg.debounceMs || s.now - s.pending.oldestAt >= MAX_REQUEST_WAIT_MS) {

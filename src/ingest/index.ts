@@ -13,7 +13,7 @@ import { NameError, safeJoin, validateSegment } from '../core/paths.js';
 import type { ItemRow } from '../db/index.js';
 import type { P2PService } from '../p2p/index.js';
 import type { ItemStatus } from '../types.js';
-import { chooseName } from './naming.js';
+import { chooseName, isNameTaken, tombstoneName } from './naming.js';
 import { hardlinkTree, mkdirp0750, PlacementError, removeVerifiedOutboxEntry } from './placement.js';
 import { INGEST_EVENT_TYPES, isUnderEntry, runEventLoop, SyncthingClient, type SyncthingEvent } from './syncthing.js';
 import { buildInfoDict, HashAbortedError, hashPieces, pieceLengthFor, renameInfoDict } from './torrent.js';
@@ -47,6 +47,8 @@ export interface IngestOptions {
 }
 
 export const OUTBOX_CHANGED_ERROR = 'outbox copy changed after ingest; not removed';
+export const STILL_IN_OUTBOX = "still in the PC outbox — remove it there, or wait until it's ready";
+export const ERROR_STILL_IN_OUTBOX = 'still in the PC outbox — remove it there first, then delete it here';
 
 /** Error with an HTTP status for the admin API (Fastify uses `statusCode`). */
 export class IngestError extends Error {
@@ -186,9 +188,8 @@ class Ingest implements IngestService {
     this.transition(id, from, 'error', { error: message });
   }
 
-  private async nameTaken(name: string): Promise<boolean> {
-    if (this.db.prepare('SELECT 1 FROM items WHERE name = ?').get(name)) return true;
-    return exists(safeJoin(this.cfg.paths.library, name));
+  private async nameTaken(name: string, exceptItemId?: string): Promise<boolean> {
+    return isNameTaken(this.db, this.cfg.paths.library, name, exceptItemId);
   }
 
   /** Insert a new item with a freshly allocated unique name. */
@@ -448,6 +449,7 @@ class Ingest implements IngestService {
           this.transition(row.id, ['incoming', 'stabilising'], 'deleted', {
             deleted_at: Date.now(),
             error: 'outbox entry disappeared before ingest',
+            name: tombstoneName(row.name, row.id),
           });
         });
         continue;
@@ -758,7 +760,7 @@ class Ingest implements IngestService {
       if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
       if (row.status === 'hashing' || row.status === 'snapshotting') throw new IngestError(409, 'item is busy; try again when it is ready');
       if (name === row.name) return;
-      if (await this.nameTaken(name)) throw new IngestError(409, 'an item with this name already exists');
+      if (await this.nameTaken(name, itemId)) throw new IngestError(409, 'an item with this name already exists');
       oldName = row.name;
       const from = this.libraryPath(row.name);
       const to = this.libraryPath(name);
@@ -789,9 +791,22 @@ class Ingest implements IngestService {
     }
   }
 
+  /**
+   * An outbox item that is not ready still has its outbox entry (removed only after a covering
+   * snapshot). Deleting just the library copy would make the next scan ingest the entry again, and
+   * we never delete an outbox entry that isn't snapshotted. So: refuse, except for `error` items
+   * whose outbox entry is already gone.
+   */
+  private async assertDeletable(row: ItemRow): Promise<void> {
+    if (row.source !== 'outbox' || row.status === 'ready') return;
+    if (row.status !== 'error') throw new IngestError(409, STILL_IN_OUTBOX);
+    if (await exists(this.outboxPath(row.source_name))) throw new IngestError(409, ERROR_STILL_IN_OUTBOX);
+  }
+
   async deleteItem(itemId: string): Promise<void> {
     const pre = this.getItem(itemId);
     if (!pre || pre.status === 'deleted') throw new IngestError(404, 'item not found');
+    await this.assertDeletable(pre);
     // Stop in-flight work first so we don't wait for a long hash.
     this.aborts.get(itemId)?.abort();
     this.hashQueue = this.hashQueue.filter((x) => x !== itemId);
@@ -799,6 +814,7 @@ class Ingest implements IngestService {
     await this.withLock(itemId, async () => {
       const row = this.getItem(itemId);
       if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
+      await this.assertDeletable(row);
       await this.deps.p2p.revokeAllForItem(itemId);
       // The name is reserved for this item, so anything at its library path is ours.
       await rm(this.libraryPath(row.name), { recursive: true, force: true });
@@ -806,7 +822,8 @@ class Ingest implements IngestService {
         await rm(safeJoin(this.cfg.paths.staging, row.upload_batch_id, row.source_name), { recursive: true, force: true });
       }
       const all: ItemStatus[] = ['incoming', 'stabilising', 'hashing', 'snapshotting', 'ready', 'error'];
-      if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now() })) return;
+      // The row keeps a tombstone name so the real name can be used again by a new item.
+      if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now(), name: tombstoneName(row.name, itemId) })) return;
       this.ctx.events.emit('item.deleted', { itemId });
       requestSnapshot(this.db, 'delete', itemId);
     });
@@ -823,7 +840,9 @@ class Ingest implements IngestService {
   async completeBatch(batchId: string): Promise<{ itemIds: string[] }> {
     const batch = this.db.prepare('SELECT status FROM upload_batches WHERE id = ?').get(batchId) as { status: string } | undefined;
     if (!batch) throw new UploadsHttpError(404, 'not_found');
-    if (batch.status !== 'open' && batch.status !== 'complete') throw new UploadsHttpError(409, 'batch_not_open');
+    if (batch.status !== 'open' && batch.status !== 'complete') {
+      throw new UploadsHttpError(409, 'batch_not_open', 'this upload round was already added to the library (or failed); start a new upload');
+    }
     const dir = safeJoin(this.cfg.paths.staging, batchId);
     let entries: string[] = [];
     try {
@@ -832,7 +851,9 @@ class Ingest implements IngestService {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     if (batch.status === 'open') {
-      if (entries.length === 0) throw new UploadsHttpError(400, 'batch_empty');
+      if (entries.length === 0) {
+        throw new UploadsHttpError(400, 'batch_empty', 'no finished files in this upload round yet; finish or retry the uploads, then try again');
+      }
       // Close the batch first: later tus finishes for it are rejected.
       const r = this.db
         .prepare("UPDATE upload_batches SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'open'")

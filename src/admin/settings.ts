@@ -4,8 +4,9 @@ import type { Db } from '../db/index.js';
 import { getSetting, setSetting } from '../db/index.js';
 import type { SettingsDto } from '../types.js';
 
-export const KEY_CAP = 'upload.cap_bps';
-export const KEY_CAPACITY = 'upload.capacity_bps';
+import { effectiveCapBps, KEY_CAP, KEY_CAPACITY } from '../core/upload-cap.js';
+
+export { effectiveCapBps, KEY_CAP, KEY_CAPACITY };
 export const KEY_MEASURED_AT = 'upload.measured_at';
 
 /** Allowed cap range: 1 KiB/s … 10 GB/s. */
@@ -13,17 +14,6 @@ export const MIN_CAP_BPS = 1024;
 export const MAX_CAP_BPS = 10_000_000_000;
 
 const finitePositive = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
-
-/**
- * The effective cap: `upload.cap_bps` if set, else floor(0.9 × capacity) if a capacity is known,
- * else 0 (= no cap configured).
- */
-export function effectiveCapBps(db: Db): number {
-  const cap = finitePositive(getSetting<number>(db, KEY_CAP));
-  if (cap !== null) return Math.floor(cap);
-  const capacity = finitePositive(getSetting<number>(db, KEY_CAPACITY));
-  return capacity !== null ? Math.floor(0.9 * capacity) : 0;
-}
 
 export function readSettings(db: Db): SettingsDto {
   const capacity = finitePositive(getSetting<number>(db, KEY_CAPACITY));

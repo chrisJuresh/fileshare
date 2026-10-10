@@ -2,7 +2,7 @@
 import { Fragment } from 'preact';
 import { useState } from 'preact/hooks';
 import type { ShareDto, SwarmSnapshot } from '../../src/types.ts';
-import { api } from './api.ts';
+import { api, errorMessage } from './api.ts';
 import { fmtBytes, fmtDate, fmtPercent, fmtRate, fmtRelative } from './format.ts';
 import { EditShareDialog } from './share-dialog.tsx';
 import { ConfirmDialog, CopyButton, Progress, useNotify } from './ui.tsx';
@@ -135,6 +135,23 @@ export function Shares(props: {
                         {s.state !== 'revoked' && (
                           <button type="button" class="btn btn-small" onClick={() => setEditing(s)}>
                             Edit
+                          </button>
+                        )}
+                        {s.state === 'active' && s.hasPassword && (
+                          <button
+                            type="button"
+                            class="btn btn-small"
+                            title="Clear wrong-password lockouts for this link (all recipients)"
+                            onClick={async () => {
+                              try {
+                                await api('POST', `/api/admin/shares/${encodeURIComponent(s.id)}/reset-limits`);
+                                notify('Password attempt limits reset');
+                              } catch (e) {
+                                notify(errorMessage(e), 'error');
+                              }
+                            }}
+                          >
+                            Reset limits
                           </button>
                         )}
                         {s.state !== 'revoked' && (

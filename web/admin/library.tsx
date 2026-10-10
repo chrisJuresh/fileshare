@@ -214,9 +214,13 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
                     >
                       Rename
                     </button>
-                    <button type="button" class="btn btn-small btn-danger-outline" onClick={() => setDeleting(item)} aria-label={`Delete ${item.name}`}>
-                      Delete
-                    </button>
+                    {/* Outbox items keep their outbox entry until ready; deleting earlier would re-ingest it
+                        (the server refuses with 409). Error items can go once removed from the PC outbox. */}
+                    {(item.source !== 'outbox' || item.status === 'ready' || item.status === 'error') && (
+                      <button type="button" class="btn btn-small btn-danger-outline" onClick={() => setDeleting(item)} aria-label={`Delete ${item.name}`}>
+                        Delete
+                      </button>
+                    )}
                   </div>
 </td>
                 </tr>

@@ -2,7 +2,7 @@
 # Create the secret files under ${APPDATA}/secrets (mode 600) if they are missing.
 # Existing files are never overwritten. Secret values are never printed.
 #
-#   scripts/gen-secrets.sh                     # share-hmac-key, syncthing-api-key, restic-password
+#   scripts/gen-secrets.sh                     # share-hmac-key, syncthing-api-key, syncthing-gui-password, restic-password
 #   scripts/gen-secrets.sh --cloudflare-token  # also store the Cloudflare API token (prompted, hidden)
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
@@ -40,6 +40,7 @@ gen() {
 
 gen share-hmac-key 32
 gen syncthing-api-key 24
+gen syncthing-gui-password 18
 gen restic-password 32
 
 cf="$dir/cloudflare-api-token"

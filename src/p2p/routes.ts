@@ -7,18 +7,20 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AppContext } from '../context.js';
 import type { ShareStatusResponse, UnlockResponse } from '../types.js';
 import { buildMagnet, buildTorrentFile, shareUrls, torrentContentDisposition } from './metainfo.js';
-import { Semaphore, UnlockRateLimiter } from './ratelimit.js';
+import { RecentOnce, Semaphore, UnlockRateLimiter } from './ratelimit.js';
 import { shareState, type ShareStore } from './shares.js';
 
 export interface PublicRouteDeps {
   shares: ShareStore;
   unlockLimiter: UnlockRateLimiter;
+  /** One `unlocked` event per (share, client) per 10 min; a reload loop can't flood share_events. */
+  unlockEvents: RecentOnce;
 }
 
 const gone = (reply: FastifyReply) => reply.code(404).send({ error: 'gone' });
 
 export async function registerShareApi(app: FastifyInstance, ctx: AppContext, deps: PublicRouteDeps): Promise<void> {
-  const { shares, unlockLimiter } = deps;
+  const { shares, unlockLimiter, unlockEvents } = deps;
   const argonGate = new Semaphore(4, 64);
 
   app.get<{ Params: { shareId: string } }>('/api/s/:shareId', async (req, reply) => {
@@ -72,7 +74,7 @@ export async function registerShareApi(app: FastifyInstance, ctx: AppContext, de
       // Re-read: the share may have changed while we were hashing.
       const cur = shares.getRow(row.id);
       if (!cur || shareState(cur, Date.now()) !== 'active' || cur.token_version !== row.token_version) return gone(reply);
-      shares.event(cur.id, 'unlocked');
+      if (unlockEvents.first(cur.id, req.ip || 'unknown')) shares.event(cur.id, 'unlocked');
       const token = shares.token(cur);
       const urls = shareUrls(ctx.config, cur.id, token);
       const info = shares.info(cur);

@@ -129,6 +129,27 @@ describe('BackupRunner (fake restic)', () => {
     expect(unconsumed()).toBe(0);
   });
 
+  it('"Snapshot now" after a failure runs at once instead of waiting for the back-off', async () => {
+    const r = makeRunner();
+    await r.tick();
+    writeFileSync(path.join(dir, 'bin', 'fail'), '');
+    request('ingest');
+    clockNow += 3 * MIN; // debounce
+    expect(await r.tick()).toEqual({ kind: 'backup', trigger: 'debounce' });
+    expect(runs().at(-1)).toMatchObject({ status: 'failed' });
+    expect(await r.tick()).toBeNull(); // back-off
+    clockNow += MIN;
+    request('manual');
+    expect(await r.tick()).toEqual({ kind: 'backup', trigger: 'manual' }); // fails again
+    expect(await r.tick()).toBeNull(); // that request no longer bypasses
+    rmSync(path.join(dir, 'bin', 'fail'));
+    clockNow += MIN;
+    request('manual');
+    expect(await r.tick()).toEqual({ kind: 'backup', trigger: 'manual' });
+    expect(runs().at(-1)).toMatchObject({ status: 'ok' });
+    expect(unconsumed()).toBe(0);
+  });
+
   it('interrupts a running backup when the pause window starts', async () => {
     const r = makeRunner();
     await r.tick();

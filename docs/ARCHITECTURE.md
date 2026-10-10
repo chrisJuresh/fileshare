@@ -58,6 +58,7 @@ scripts/
   gen-secrets.sh          creates the secrets files (mode 600) if missing
   speedtest.sh            one-off upload measurement in a throwaway container
   pair-pc.sh <device-id>  adds the PC's Syncthing device + shares the outbox (run over SSH)
+  syncthing-init.sh       sets the Syncthing GUI user/password from the secret file (idempotent)
   gen-testdata.sh         synthetic random test files
   caddy/                  the staged Caddy site block + apply/verify helper
   ufw/                    the ufw plan + apply/revert helper
@@ -110,7 +111,9 @@ uses `path: /state/seedlinks/<shareId>`, so a share's frozen torrent name keeps 
 item is renamed on disk.
 
 Ownership: everything is owned by `${PUID}:${PGID}`, and data dirs are `0750` (no group/other
-write). All containers run as `${PUID}:${PGID}`.
+write). All containers run as `${PUID}:${PGID}`. At startup, before p2p or ingest start, the app
+creates any missing `library/`, `outbox/`, `staging/`, `uploads/` and `/state/seedlinks/` (mode
+`0750`; `src/core/dirs.ts`).
 
 ## 3. SQLite schema
 
@@ -125,7 +128,8 @@ CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER 
 
 CREATE TABLE items (
   id            TEXT PRIMARY KEY,               -- newId()
-  name          TEXT NOT NULL UNIQUE,           -- entry name under /data/library (also display name)
+  name          TEXT NOT NULL UNIQUE,           -- entry name under /data/library (also display name);
+                                                -- deleted rows: '<name> [deleted <id>]' (005), so names are reusable
   kind          TEXT NOT NULL CHECK (kind IN ('file','dir')),
   source        TEXT NOT NULL CHECK (source IN ('outbox','upload')),
   source_name   TEXT NOT NULL,                  -- top-level entry name in outbox or staging/<batch>
@@ -284,15 +288,23 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
 * **Invariant (tested): an outbox file is never deleted unless it is verified in the library and
   covered by a successful snapshot.**
 * **delete**:
+  0. Outbox items that are not `ready` still have their outbox entry, so deleting only the library
+     copy would re-ingest it on the next scan (and an un-snapshotted outbox entry is never deleted).
+     Such a delete is a **409** "still in the PC outbox — remove it there, or wait until it's ready".
+     Exception: an `error` item whose outbox entry is already gone can be deleted. The dashboard
+     hides Delete for outbox items in `incoming`/`stabilising`/`hashing`/`snapshotting`.
   1. Revoke all shares (stops seeding).
   2. `rm -r` the library entry.
-  3. Set status `deleted` and `deleted_at`.
+  3. Set status `deleted`, `deleted_at`, and the tombstone name `<name> [deleted <id>]`, so the name
+     can be used again (also when an outbox entry disappears before ingest).
   4. `requestSnapshot('delete')`.
 
   Old snapshots keep the data until retention removes it.
 * **rename**:
   1. Validate the new name (§9).
-  2. Renaming to an existing name is a 409.
+  2. Renaming to a name that is taken is a 409. "Taken" has one definition for ingest and the admin
+     API (`isNameTaken`, `ingest/naming.ts`): another item row has it, or something exists at
+     `/data/library/<name>`. Deleted rows hold tombstone names and never block.
   3. `rename()` on disk, update `items.name`.
   4. Re-point seedlinks for the item's active shares.
   5. `requestSnapshot('rename')`.
@@ -319,6 +331,9 @@ The `restic` service runs `node dist/backup/main.js`. It talks to the app **only
   `SNAPSHOT_DEBOUNCE_SECONDS` (120) old, or the oldest one is ≥ 10 min old.
 * **Hourly:** run a backup if the last successful backup started more than 60 min ago (and anything
   changed, or always; restic dedups).
+* **Failure back-off:** after a failed backup, the next one waits 5, 10, 20, 40, then 60 min. A
+  `manual` request made after the last failed backup started bypasses the back-off once (if that
+  run fails too, the request is older than the new failure and waits like the others).
 * **Pause window `SNAPSHOT_PAUSE_WINDOW` = `03:45-05:15` (local `TZ`):**
   - No job starts in `[pause_start − 15 min, pause_end)`.
   - A job still running at `pause_start` gets SIGINT (status `interrupted`).
@@ -349,7 +364,7 @@ latestRuns(db): { backup?: BackupRunRow; forget?: BackupRunRow; check?: BackupRu
 | BitTorrent TCP + uTP        | `0.0.0.0:6890` (`BT_PORT`)   | internet (router forward + ufw) |
 | WebRTC ICE (UDP mux)        | `0.0.0.0:6891` (`WEBRTC_PORT`) | internet (router forward + ufw) |
 | Syncthing sync              | `${LAN_IP}:22000` tcp+udp (published) | the PC on the LAN |
-| Syncthing GUI/REST          | `127.0.0.1:8384` (published) | `app` (host network) + operator via SSH tunnel |
+| Syncthing GUI/REST          | `127.0.0.1:8384` (published) | `app` (host network, API key) + operator via SSH tunnel (GUI login `admin` + `syncthing-gui-password`) |
 
 Caddy's public site is on **port 8443 only** (router: external 443 → server 8443). Every URL the app
 emits is built from `PUBLIC_BASE_URL` (e.g. `https://files.example.com`), **never** from the request's
@@ -368,10 +383,10 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/sw.min.js` | server | WebTorrent service worker at root scope (`Service-Worker-Allowed: /`) |
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |
-| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string}` → 200 `UnlockResponse` (§7.3) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. |
+| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string}` → 200 `UnlockResponse` (§7.3) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event is written at most once per (share, client) per 10 min. |
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
-| GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. |
-| GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers) |
+| GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
+| GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers). At most 500 sockets per share and 5000 in total; beyond that the socket is closed with 1013. |
 | GET/HEAD | `/ws/:token/*` | p2p | webseed: `/<torrent_name>/<file path>` (or `/<torrent_name>` for single-file). Range support, throttled by the shared upload limiter, CORS `*` for GET/HEAD only, no cookies. |
 | GET (WS) | `/api/s/:shareId/live` | p2p | swarm stats socket (§8) |
 
@@ -384,16 +399,27 @@ Security headers (all public responses):
 - `Cross-Origin-Opener-Policy: same-origin`
 - `Permissions-Policy` minimal
 
-HSTS is set by Caddy. Request logging must not log full `/tr/` or `/ws/` URLs: redact the token
-segment.
+HSTS is set by Caddy. Request logging: Fastify's built-in request lines (full URL + client IP) are
+off on both listeners (`server/log-controller.ts`, a `LogController` with request logging disabled;
+5xx errors are still logged, without URL or IP). Each listener logs one line per response itself.
+On the public listener the URL goes through `redactUrl()` (`log.ts`): the `/tr/` and `/ws/` token
+segment becomes `[token]`, `/tr/` query strings are dropped, every `t=` value becomes `[token]`,
+share ids in `/s/<id>` and `/api/s/<id>/…` are cut to their first 4 characters plus `…`, and
+unmatched paths are logged as `[unmatched]`. Client IPs are never logged.
 
 ### 7.2 Admin listener (`src/server/admin.ts`)
 
 Every request except `/healthz` passes `accessJwt` middleware:
 1. Verify `Cf-Access-Jwt-Assertion` with `jose` (RS256) against `https://${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`,
-   `issuer = https://${CF_ACCESS_TEAM_DOMAIN}` and `audience = CF_ACCESS_AUD`.
-2. If `ADMIN_EMAILS` is set, require the `email` claim to be in it.
-3. Otherwise 403. (`CF_ACCESS_CERTS_URL` overrides the certs URL; it exists for tests.)
+   `issuer = https://${CF_ACCESS_TEAM_DOMAIN}` and `audience = CF_ACCESS_AUD`. `CF_ACCESS_TEAM_DOMAIN`
+   must be a bare host name ending in `.cloudflareaccess.com` (otherwise every request is refused and
+   the reason is logged at startup).
+2. A token without an `email` claim (Access service token) is refused unless `ADMIN_EMAILS` lists its
+   client id (`common_name` claim) explicitly.
+3. If `ADMIN_EMAILS` is set, require the `email` claim to be in it. If it is empty, any identity the
+   Access policy admits is allowed, and a warning is logged at startup (outside tests).
+4. Otherwise 403. (`CF_ACCESS_CERTS_URL` overrides the certs URL **only with `NODE_ENV=test`**; in any
+   other mode it is ignored with a startup warning. In tests the team domain may be any host name.)
 
 Mutating requests must also be `Content-Type: application/json` (except tus) and carry an `Origin`
 equal to `ADMIN_BASE_URL`.
@@ -404,20 +430,22 @@ equal to `ADMIN_BASE_URL`.
 | GET | `/`, `/assets/*` | server | dashboard static (`dist/web/admin/`) |
 | GET | `/api/admin/items` | admin | `ItemDto[]` |
 | PATCH | `/api/admin/items/:id` | admin→ingest | `{name}` rename |
-| DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares) |
+| DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares). 409 for an outbox item that is not ready (an `error` one: while its outbox entry exists), see §4 |
 | POST | `/api/admin/items/:id/retry` | admin→ingest | retry after error |
 | GET | `/api/admin/items/:id/files` | admin | `{path,length}[]` |
 | GET | `/api/admin/shares` | admin | `ShareDto[]` (incl. stats) |
 | POST | `/api/admin/shares` | admin→p2p | `{itemId, password?: string, expiresAt?: number}` → `ShareDto` (incl. `url`) |
 | PATCH | `/api/admin/shares/:id` | admin→p2p | `{password?: string|null, expiresAt?: number|null}`. `null` clears; absent = unchanged. Changing the password bumps `token_version`. |
 | POST | `/api/admin/shares/:id/revoke` | admin→p2p | |
+| POST | `/api/admin/shares/:id/reset-limits` | admin→p2p | clears the share's unlock failure counters (per share and per client); 404 for unknown ids |
 | GET | `/api/admin/shares/:id/events` | admin | history |
 | GET | `/api/admin/stats` | admin | `StatsDto`: totals, per share, upload now vs cap, peak swarm |
 | GET | `/api/admin/status` | admin | disks, restic status, Syncthing connection, versions |
 | GET/PUT | `/api/admin/settings` | admin | `{uploadCapBps, uploadCapacityBps}` |
 | POST | `/api/admin/snapshots` | admin | manual snapshot request |
 | POST | `/api/admin/uploads/batches` | ingest | → `{id}` |
-| POST | `/api/admin/uploads/batches/:id/complete` | ingest | the batch's top-level entries become items |
+| GET | `/api/admin/uploads/batches/:id` | ingest | → `{id, status}` (404 unknown). The dashboard keeps its batch id in `localStorage` until `complete` succeeds and reuses it after a reload while it is `open`: a resumed tus upload keeps the metadata it was **created** with, so it always finishes into its original batch. |
+| POST | `/api/admin/uploads/batches/:id/complete` | ingest | the batch's top-level entries become items. Errors carry `{error, message}`: 400 `batch_empty` (no finished file yet), 409 `batch_not_open` (already completed/failed; start a new upload). A tus upload finishing into a batch that is no longer open gets 409 "…already finished; remove the file and add it again". |
 | * | `/api/admin/uploads/tus/*` | ingest | tus 1.0 (`@tus/server` + `@tus/file-store`). Metadata: `batchId`, `relativePath`, `filename`. Clients use 50 MiB chunks. |
 | GET (WS) | `/api/admin/live` | admin | §8 admin stream |
 
@@ -474,7 +502,15 @@ server → client (every ~1.5 s, and on change):
 * Torrent-client rows take progress from the seeder's `wire.peerPieces` bitfield when connected,
   otherwise from the tracker announce's `left`.
 * Peers that disconnect are removed after 30 s.
+* Accounting: `peer_bytes` counts the increase of each peer's reported cumulative `uploaded`, and a
+  completion counts once per peer id. The per-peer ledger is kept while the share is active (also
+  across idle periods) and dropped when it becomes inactive. A tracker `completed` event counts
+  only if that peer announced `started`/an update before. Bounds per share: at most 1000
+  remembered peers per map (oldest evicted) and at most 200 counted completions per rolling hour.
 * **No IPs anywhere in any message, log line at info level or DB row.**
+* **Privacy, inherent to P2P:** recipients in the same swarm see each other's IP addresses (WebRTC
+  ICE candidates relayed by the tracker; HTTP tracker peer lists for torrent clients). The app never
+  stores or displays them. README and the share page (under the swarm table) say so.
 
 **Admin: `wss://<admin>/api/admin/live`** (JWT checked on upgrade), server → client every ~2 s:
 ```jsonc
@@ -519,7 +555,9 @@ There is one process-wide token bucket (`p2p/limiter.ts`) for **all** server upl
 - seeder (TCP, uTP, WebRTC)
 
 The seeder uses WebTorrent's upload throttle group. The webseed pipes through a throttle from the
-**same** group. The rate is `settings.upload.cap_bps`, applied live on `settings.changed`.
+**same** group. The rate is the **effective cap** from `core/upload-cap.ts` (the one definition,
+also used by the dashboard/stats/live): `upload.cap_bps` if set, else `floor(0.9 × upload.capacity_bps)`
+if a capacity is known, else unlimited. It is re-applied live on `settings.changed` for either key.
 `currentBps()` is a 2 s moving average used by stats.
 
 ## 11. P2P settings (verified against webtorrent 3.0.21)
@@ -535,7 +573,11 @@ The seeder uses WebTorrent's upload throttle group. The webseed pipes through a 
 
 Torrents are added from stored metainfo with `{ path: /state/seedlinks/<shareId>, skipVerify: true }`.
 Only **active** shares are seeded. They are added and removed on `share.changed`, and an expiry
-sweep runs every 30 s.
+sweep runs every 30 s. The same reconcile step ends live access: when a share stops being active it
+is unseeded, its tracker swarm and WebSockets are dropped, and its **in-flight webseed responses are
+destroyed**; when its `token_version` changes (new password), sockets and webseed responses
+authorised with the old version are closed. `revokeAllForItem` (item delete) also ends every
+in-flight webseed response for the item's shares before the files are removed.
 
 **Browser client:**
 - `client.add(torrent, { strategy:'rarest', deselect:true, maxWebConns: 2 })` with the tracker's
@@ -567,6 +609,7 @@ created by `scripts/gen-secrets.sh`:
 |-------------------------|----------------|
 | `share-hmac-key`        | app            |
 | `syncthing-api-key`     | app, syncthing (`STGUIAPIKEY` via entrypoint from file) |
+| `syncthing-gui-password`| operator: Syncthing GUI user `admin`; set via REST by `scripts/syncthing-init.sh` (Syncthing stores a bcrypt hash) |
 | `restic-password`       | restic runner  |
 | `cloudflare-api-token`  | ddns (created by the user) |
 
@@ -604,6 +647,7 @@ interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;          // after rename: fix seedlinks
+  resetUnlockLimits(id: string): void;                 // admin "reset limits"
   swarm(shareId: string): SwarmSnapshot | undefined;
   allSwarms(): Record<string, SwarmSnapshot>;
   limiter: UploadLimiter;
@@ -618,7 +662,9 @@ registerAdminApi(app: FastifyInstance, ctx: AppContext, deps: { ingest: IngestSe
 
 * **Unit:** `vitest`, `*.test.ts` next to the code, with temp dirs and in-memory or temp SQLite.
 * **Integration:** `test/integration/*.test.ts`. The real app runs in-process on ephemeral ports,
-  with a fake Syncthing REST server and a local JWKS for Access.
+  with a fake Syncthing REST server and a local JWKS for Access. `full-stack.test.ts` wires the real
+  admin listener + ingest + p2p + public listener together (tus upload → ready → share → unlock →
+  webseed → revoke → delete); only Syncthing, the restic runner and the Access key server are fakes.
 * **E2E:** Playwright (`test/e2e/`). The app runs via `scripts/test-stack.sh` on non-default ports.
   It covers 6 Chromium peers, Firefox fallback, enforcement and the upload cap.
 * **Test data is always synthetic:** random bytes from `scripts/gen-testdata.sh`.

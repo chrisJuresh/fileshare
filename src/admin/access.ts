@@ -16,6 +16,8 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const TUS_PREFIX = '/api/admin/uploads/tus/';
 const MAX_JWT_LENGTH = 16 * 1024;
 const CLOCK_TOLERANCE_S = 60;
+const HOSTNAME_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const ACCESS_SUFFIX = '.cloudflareaccess.com';
 
 export interface AccessSettings {
   issuer: string;
@@ -25,15 +27,26 @@ export interface AccessSettings {
   allowedOrigin: string;
 }
 
+/** True when CF_ACCESS_CERTS_URL is set but will be ignored (it is honoured only with NODE_ENV=test). */
+export function certsOverrideIgnored(config: Config): boolean {
+  return config.env.CF_ACCESS_CERTS_URL.trim() !== '' && !config.isTest;
+}
+
 /** Derives the verifier settings from config, or returns a reason string if they are incomplete. */
 export function accessSettings(config: Config): AccessSettings | string {
-  const team = config.env.CF_ACCESS_TEAM_DOMAIN.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const team = config.env.CF_ACCESS_TEAM_DOMAIN.trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/+$/, '');
   const aud = config.env.CF_ACCESS_AUD.trim();
   if (!team) return 'CF_ACCESS_TEAM_DOMAIN is not set';
   if (!aud) return 'CF_ACCESS_AUD is not set';
+  // A bare host name: the issuer and the key URL are built from it.
+  if (!HOSTNAME_RE.test(team)) return 'CF_ACCESS_TEAM_DOMAIN must be a bare host name like <team>.cloudflareaccess.com';
+  if (!config.isTest && !team.endsWith(ACCESS_SUFFIX)) return `CF_ACCESS_TEAM_DOMAIN must end in ${ACCESS_SUFFIX}`;
+  // The certs URL override exists for tests only: in production a wrong value would let someone
+  // else's keys sign admin tokens.
+  const override = config.isTest ? config.env.CF_ACCESS_CERTS_URL.trim() : '';
   let certsUrl: URL;
   try {
-    certsUrl = new URL(config.env.CF_ACCESS_CERTS_URL.trim() || `https://${team}/cdn-cgi/access/certs`);
+    certsUrl = new URL(override || `https://${team}/cdn-cgi/access/certs`);
   } catch {
     return 'CF_ACCESS_CERTS_URL / CF_ACCESS_TEAM_DOMAIN do not form a valid URL';
   }
@@ -62,6 +75,13 @@ export function createAccessVerifier(s: AccessSettings, keys?: JWTVerifyGetKey):
         requiredClaims: ['exp', 'iat'],
       });
       const email = typeof payload.email === 'string' ? payload.email.trim().toLowerCase() : '';
+      if (!email) {
+        // No email claim = an Access service token. Only allowed when ADMIN_EMAILS lists it
+        // explicitly by its client id (`common_name` claim).
+        const cn = typeof payload.common_name === 'string' ? payload.common_name.trim().toLowerCase() : '';
+        if (!cn || !s.allowEmails.includes(cn)) return { ok: false, reason: 'no_email' };
+        return { ok: true, email: '' };
+      }
       if (s.allowEmails.length > 0 && !s.allowEmails.includes(email)) return { ok: false, reason: 'email_not_allowed' };
       return { ok: true, email };
     } catch (err) {
@@ -99,6 +119,12 @@ export function createAccessHook(config: Config, log: Logger, keys?: JWTVerifyGe
   const verify = typeof settings === 'string' ? undefined : createAccessVerifier(settings, keys);
   if (typeof settings === 'string') {
     log.error({ reason: settings }, 'admin: Cloudflare Access is not configured; every admin request will be refused (403)');
+  }
+  if (certsOverrideIgnored(config)) {
+    log.warn('admin: CF_ACCESS_CERTS_URL is ignored outside NODE_ENV=test; using the team domain\'s key URL');
+  }
+  if (config.adminEmails.length === 0 && !config.isTest) {
+    log.warn('admin: ADMIN_EMAILS is empty: every user the Cloudflare Access policy lets in can use the admin API');
   }
   const allowedOrigin = config.adminBaseUrl.origin;
 
