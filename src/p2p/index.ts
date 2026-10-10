@@ -17,7 +17,7 @@ import { internalAnnounceHost, Seeder } from './seeder.js';
 import { P2PError, shareState, ShareStore, type ArgonOptions } from './shares.js';
 import { SwarmStats, type SwarmTimings } from './swarm.js';
 import { scrub, TrackerService } from './tracker.js';
-import { registerWebseed } from './webseed.js';
+import { registerWebseed, type WebseedControl } from './webseed.js';
 
 export { P2PError } from './shares.js';
 
@@ -75,6 +75,7 @@ export class P2P implements P2PService {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly log;
   private app: FastifyInstance | undefined;
+  private webseed: WebseedControl | undefined;
   private started = false;
   private listening = false;
 
@@ -105,7 +106,7 @@ export class P2P implements P2PService {
     this.app = app;
     await registerShareApi(app, this.ctx, { shares: this.shares, unlockLimiter: this.unlockLimiter });
     await this.tracker.register(app);
-    await registerWebseed(app, this.ctx, {
+    this.webseed = await registerWebseed(app, this.ctx, {
       shares: this.shares,
       limiter: this.limiter,
       onBytes: (id, n) => this.stats.addWebseed(id, n),
@@ -218,11 +219,13 @@ export class P2P implements P2PService {
     if (shareState(row, Date.now()) === 'active') {
       this.tracker.closeStale(row.id, row.token_version);
       this.stats.closeStale(row.id, row.token_version);
+      this.webseed?.closeStale(row.id, row.token_version);
       if (this.seeder && this.started && (this.listening || this.app?.server.listening)) {
         await this.shares.ensureSeedlink(row);
         await this.seeder.ensure(row);
       }
     } else {
+      this.webseed?.closeShare(row.id);
       await this.seeder?.remove(row.id);
       this.tracker.dropShare(row.id, row.info_hash);
       this.stats.closeShare(row.id, 4404);
@@ -264,6 +267,9 @@ export class P2P implements P2PService {
       this.ctx.events.emit('share.changed', { shareId: id, reason: 'revoked' });
       await this.reconcile(id);
     }
+    // The item's files are about to be deleted: end every in-flight webseed response for it, also
+    // for shares that were already inactive (e.g. expired but not yet swept).
+    for (const r of this.shares.allRows()) if (r.item_id === itemId) this.webseed?.closeShare(r.id);
   }
 
   async repointItem(itemId: string): Promise<void> {

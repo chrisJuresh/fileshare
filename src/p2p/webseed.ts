@@ -85,16 +85,40 @@ function contentDisposition(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${star}`;
 }
 
-export async function registerWebseed(app: FastifyInstance, ctx: AppContext, deps: WebseedDeps): Promise<void> {
+/** Ends in-flight webseed responses when access is withdrawn (revoke, expiry, delete, new password). */
+export interface WebseedControl {
+  /** Destroy every in-flight response of a share. Returns how many were ended. */
+  closeShare(shareId: string): number;
+  /** Destroy in-flight responses of a share that were authorised with another token_version. */
+  closeStale(shareId: string, tokenVersion: number): number;
+}
+
+interface InFlight {
+  shareId: string;
+  tokenVersion: number;
+  end(): void;
+}
+
+export async function registerWebseed(app: FastifyInstance, ctx: AppContext, deps: WebseedDeps): Promise<WebseedControl> {
   const { shares, limiter } = deps;
   const fileIndex = new Map<string, Map<string, FileEntry>>();
   const idleMs = deps.idleTimeoutMs ?? 60_000;
-  /** In-flight body streams, destroyed on shutdown so close() never waits on a slow client. */
-  const active = new Set<Transform>();
+  /** In-flight body streams, destroyed on shutdown/revoke so nothing keeps streaming without access. */
+  const active = new Map<Transform, InFlight>();
   app.addHook('preClose', async () => {
-    for (const s of active) s.destroy();
+    for (const f of active.values()) f.end();
     active.clear();
   });
+  const closeWhere = (pred: (f: InFlight) => boolean): number => {
+    let n = 0;
+    for (const [s, f] of active) {
+      if (!pred(f)) continue;
+      active.delete(s);
+      f.end();
+      n++;
+    }
+    return n;
+  };
 
   const notFound = (reply: FastifyReply) => reply.code(404).send({ error: 'gone' });
 
@@ -173,14 +197,15 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
       // pipeline destroys every stage (and closes the fd) if the client disconnects mid-transfer:
       // Fastify destroys the payload stream when the response closes early.
       pipeline(file, limiter.throttle(), counter, () => {});
-      active.add(counter);
-      counter.once('close', () => active.delete(counter));
-      // A client that stops reading (backpressure) would otherwise hold the fd and socket forever.
       const res = reply.raw;
-      res.setTimeout(idleMs, () => {
+      const stop = (): void => {
         counter.destroy();
         res.destroy();
-      });
+      };
+      active.set(counter, { shareId, tokenVersion: share.token_version, end: stop });
+      counter.once('close', () => active.delete(counter));
+      // A client that stops reading (backpressure) would otherwise hold the fd and socket forever.
+      res.setTimeout(idleMs, stop);
       res.once('finish', () => res.setTimeout(0));
       return reply.send(counter);
     } finally {
@@ -190,4 +215,9 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
 
   app.route({ method: ['GET', 'HEAD'], url: '/ws/:token', exposeHeadRoute: false, handler });
   app.route({ method: ['GET', 'HEAD'], url: '/ws/:token/*', exposeHeadRoute: false, handler });
+
+  return {
+    closeShare: (shareId) => closeWhere((f) => f.shareId === shareId),
+    closeStale: (shareId, tokenVersion) => closeWhere((f) => f.shareId === shareId && f.tokenVersion !== tokenVersion),
+  };
 }

@@ -542,7 +542,11 @@ The seeder uses WebTorrent's upload throttle group. The webseed pipes through a 
 
 Torrents are added from stored metainfo with `{ path: /state/seedlinks/<shareId>, skipVerify: true }`.
 Only **active** shares are seeded. They are added and removed on `share.changed`, and an expiry
-sweep runs every 30 s.
+sweep runs every 30 s. The same reconcile step ends live access: when a share stops being active it
+is unseeded, its tracker swarm and WebSockets are dropped, and its **in-flight webseed responses are
+destroyed**; when its `token_version` changes (new password), sockets and webseed responses
+authorised with the old version are closed. `revokeAllForItem` (item delete) also ends every
+in-flight webseed response for the item's shares before the files are removed.
 
 **Browser client:**
 - `client.add(torrent, { strategy:'rarest', deselect:true, maxWebConns: 2 })` with the tracker's
