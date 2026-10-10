@@ -1,0 +1,96 @@
+# Throwaway containers for the end-to-end test stack (scripts/test-stack.sh). Never used in
+# production. Project name `fileshare-test`; everything lives under ${STACK_DIR} (a scratch dir)
+# and only loopback ports in the 18xxx range are published.
+#
+#   syncthing-server  the server's Syncthing, configured by scripts/pair-pc.sh exactly as in production
+#   syncthing-pc      stands in for the Windows PC (configured like docs/pc-setup.md)
+#   restic            the restic runner, same image + mounts as the production `restic` service,
+#                     running this checkout's dist/ (so snapshot paths are /data/library etc.)
+name: fileshare-test
+
+x-common: &common
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  labels:
+    com.centurylinklabs.watchtower.enable: "false"
+    fileshare-test: "true"
+
+x-syncthing: &syncthing
+  <<: *common
+  image: syncthing/syncthing:2.1.6@sha256:4d0281bdcb4ed9baf503d251d0544ddd856f49fce3f114056257ae172b7fb670
+  user: "${PUID:?}:${PGID:?}"
+  entrypoint:
+    - /bin/sh
+    - -c
+    - 'set -eu; STGUIAPIKEY="$$(cat /run/secrets/syncthing-api-key)"; [ -n "$$STGUIAPIKEY" ]; export STGUIAPIKEY; exec /bin/syncthing'
+  environment:
+    HOME: /var/syncthing/config
+    STHOMEDIR: /var/syncthing/config
+    STGUIADDRESS: 0.0.0.0:8384
+    STNOUPGRADE: "1"
+    STNODEFAULTFOLDER: "1"
+    TZ: UTC
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  mem_limit: 1g
+
+services:
+  syncthing-server:
+    <<: *syncthing
+    hostname: fileshare
+    volumes:
+      - { type: bind, source: "${STACK_DIR:?}/syncthing-server", target: /var/syncthing/config }
+      - { type: bind, source: "${STACK_DIR}/data/outbox", target: /data/outbox }
+      - { type: bind, source: "${STACK_DIR}/secrets/syncthing-api-key", target: /run/secrets/syncthing-api-key, read_only: true }
+    ports:
+      - "127.0.0.1:${ST_SERVER_PORT:?}:8384/tcp"
+
+  syncthing-pc:
+    <<: *syncthing
+    hostname: fileshare-test-pc
+    volumes:
+      - { type: bind, source: "${STACK_DIR}/syncthing-pc", target: /var/syncthing/config }
+      - { type: bind, source: "${STACK_DIR}/pc-folder", target: /data/pc }
+      - { type: bind, source: "${STACK_DIR}/secrets/syncthing-pc-api-key", target: /run/secrets/syncthing-api-key, read_only: true }
+    ports:
+      - "127.0.0.1:${ST_PC_PORT:?}:8384/tcp"
+
+  restic:
+    <<: *common
+    image: ${FILESHARE_TEST_IMAGE:-fileshare:dev}
+    pull_policy: never
+    init: true
+    command: ["node", "dist/backup/main.js"]
+    user: "${PUID}:${PGID}"
+    network_mode: none
+    hostname: fileshare-restic
+    env_file:
+      - ${STACK_DIR}/stack.env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      STATE_DIR: /state
+      SECRETS_DIR: /secrets
+      RESTIC_REPOSITORY: /restic
+      RESTIC_PASSWORD_FILE: /secrets/restic-password
+      RESTIC_CACHE_DIR: /state/restic-cache
+      RESTIC_BIN: /usr/local/bin/restic
+      BACKUP_EXTRA_PATHS: /config/.env,/secrets,/syncthing-config
+      HOME: /tmp
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      # This checkout's build, so the runner under test is the code under test.
+      - { type: bind, source: ./dist, target: /app/dist, read_only: true }
+      - { type: bind, source: "${STACK_DIR}/data/library", target: /data/library, read_only: true }
+      - { type: bind, source: "${STACK_DIR}/state", target: /state }
+      - { type: bind, source: "${STACK_DIR}/secrets", target: /secrets, read_only: true }
+      - { type: bind, source: "${STACK_DIR}/syncthing-server", target: /syncthing-config, read_only: true }
+      - { type: bind, source: "${STACK_DIR}/restic-repo", target: /restic }
+      - { type: bind, source: "${STACK_DIR}/stack.env", target: /config/.env, read_only: true }
+    stop_grace_period: 2m
+    mem_limit: 1g
