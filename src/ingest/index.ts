@@ -13,7 +13,7 @@ import { NameError, safeJoin, validateSegment } from '../core/paths.js';
 import type { ItemRow } from '../db/index.js';
 import type { P2PService } from '../p2p/index.js';
 import type { ItemStatus } from '../types.js';
-import { chooseName } from './naming.js';
+import { chooseName, isNameTaken, tombstoneName } from './naming.js';
 import { hardlinkTree, mkdirp0750, PlacementError, removeVerifiedOutboxEntry } from './placement.js';
 import { INGEST_EVENT_TYPES, isUnderEntry, runEventLoop, SyncthingClient, type SyncthingEvent } from './syncthing.js';
 import { buildInfoDict, HashAbortedError, hashPieces, pieceLengthFor, renameInfoDict } from './torrent.js';
@@ -186,9 +186,8 @@ class Ingest implements IngestService {
     this.transition(id, from, 'error', { error: message });
   }
 
-  private async nameTaken(name: string): Promise<boolean> {
-    if (this.db.prepare('SELECT 1 FROM items WHERE name = ?').get(name)) return true;
-    return exists(safeJoin(this.cfg.paths.library, name));
+  private async nameTaken(name: string, exceptItemId?: string): Promise<boolean> {
+    return isNameTaken(this.db, this.cfg.paths.library, name, exceptItemId);
   }
 
   /** Insert a new item with a freshly allocated unique name. */
@@ -448,6 +447,7 @@ class Ingest implements IngestService {
           this.transition(row.id, ['incoming', 'stabilising'], 'deleted', {
             deleted_at: Date.now(),
             error: 'outbox entry disappeared before ingest',
+            name: tombstoneName(row.name, row.id),
           });
         });
         continue;
@@ -758,7 +758,7 @@ class Ingest implements IngestService {
       if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
       if (row.status === 'hashing' || row.status === 'snapshotting') throw new IngestError(409, 'item is busy; try again when it is ready');
       if (name === row.name) return;
-      if (await this.nameTaken(name)) throw new IngestError(409, 'an item with this name already exists');
+      if (await this.nameTaken(name, itemId)) throw new IngestError(409, 'an item with this name already exists');
       oldName = row.name;
       const from = this.libraryPath(row.name);
       const to = this.libraryPath(name);
@@ -806,7 +806,8 @@ class Ingest implements IngestService {
         await rm(safeJoin(this.cfg.paths.staging, row.upload_batch_id, row.source_name), { recursive: true, force: true });
       }
       const all: ItemStatus[] = ['incoming', 'stabilising', 'hashing', 'snapshotting', 'ready', 'error'];
-      if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now() })) return;
+      // The row keeps a tombstone name so the real name can be used again by a new item.
+      if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now(), name: tombstoneName(row.name, itemId) })) return;
       this.ctx.events.emit('item.deleted', { itemId });
       requestSnapshot(this.db, 'delete', itemId);
     });

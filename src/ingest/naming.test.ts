@@ -1,6 +1,48 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { validateSegment } from '../core/paths.js';
-import { chooseName, timestampSuffix } from './naming.js';
+import { openDb } from '../db/index.js';
+import { chooseName, isNameTaken, timestampSuffix, tombstoneName } from './naming.js';
+
+describe('isNameTaken / tombstones', () => {
+  const insert = (db: ReturnType<typeof openDb>, id: string, name: string, status: string) =>
+    db
+      .prepare(`INSERT INTO items (id, name, kind, source, source_name, status, created_at, updated_at) VALUES (?, ?, 'file', 'upload', ?, ?, 1, 1)`)
+      .run(id, name, id, status);
+
+  it('live rows and library entries block a name; tombstoned deleted rows and the item itself do not', async () => {
+    const lib = mkdtempSync(path.join(os.tmpdir(), 'fileshare-naming-'));
+    const db = openDb(':memory:');
+    try {
+      insert(db, 'a'.repeat(26), 'Live', 'ready');
+      insert(db, 'b'.repeat(26), tombstoneName('Gone', 'b'.repeat(26)), 'deleted');
+      mkdirSync(path.join(lib, 'OnDisk'));
+      expect(await isNameTaken(db, lib, 'Live')).toBe(true);
+      expect(await isNameTaken(db, lib, 'Live', 'a'.repeat(26))).toBe(false);
+      expect(await isNameTaken(db, lib, 'Gone')).toBe(false);
+      expect(await isNameTaken(db, lib, 'OnDisk')).toBe(true);
+      expect(await isNameTaken(db, lib, 'Free')).toBe(false);
+    } finally {
+      db.close();
+      rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it('migration 005 tombstones rows deleted before the change (idempotently)', () => {
+    const db = openDb(':memory:');
+    insert(db, 'c'.repeat(26), 'Old', 'deleted');
+    insert(db, 'd'.repeat(26), tombstoneName('Done', 'd'.repeat(26)), 'deleted');
+    insert(db, 'e'.repeat(26), 'Kept', 'ready');
+    const sql = readFileSync(path.join(import.meta.dirname, '..', 'db', 'migrations', '005_item_name_tombstones.sql'), 'utf8');
+    db.exec(sql);
+    db.exec(sql);
+    const names = (db.prepare('SELECT name FROM items ORDER BY id').all() as { name: string }[]).map((r) => r.name);
+    expect(names).toEqual([tombstoneName('Old', 'c'.repeat(26)), tombstoneName('Done', 'd'.repeat(26)), 'Kept']);
+    db.close();
+  });
+});
 
 describe('chooseName', () => {
   const at = new Date(2026, 9, 10, 9, 5); // local time 2026-10-10 09:05

@@ -127,7 +127,8 @@ CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER 
 
 CREATE TABLE items (
   id            TEXT PRIMARY KEY,               -- newId()
-  name          TEXT NOT NULL UNIQUE,           -- entry name under /data/library (also display name)
+  name          TEXT NOT NULL UNIQUE,           -- entry name under /data/library (also display name);
+                                                -- deleted rows: '<name> [deleted <id>]' (005), so names are reusable
   kind          TEXT NOT NULL CHECK (kind IN ('file','dir')),
   source        TEXT NOT NULL CHECK (source IN ('outbox','upload')),
   source_name   TEXT NOT NULL,                  -- top-level entry name in outbox or staging/<batch>
@@ -288,13 +289,16 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
 * **delete**:
   1. Revoke all shares (stops seeding).
   2. `rm -r` the library entry.
-  3. Set status `deleted` and `deleted_at`.
+  3. Set status `deleted`, `deleted_at`, and the tombstone name `<name> [deleted <id>]`, so the name
+     can be used again (also when an outbox entry disappears before ingest).
   4. `requestSnapshot('delete')`.
 
   Old snapshots keep the data until retention removes it.
 * **rename**:
   1. Validate the new name (§9).
-  2. Renaming to an existing name is a 409.
+  2. Renaming to a name that is taken is a 409. "Taken" has one definition for ingest and the admin
+     API (`isNameTaken`, `ingest/naming.ts`): another item row has it, or something exists at
+     `/data/library/<name>`. Deleted rows hold tombstone names and never block.
   3. `rename()` on disk, update `items.name`.
   4. Re-point seedlinks for the item's active shares.
   5. `requestSnapshot('rename')`.
