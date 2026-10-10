@@ -270,6 +270,18 @@ a new link has a new id.
 - The PC's firewall must allow Syncthing (Windows asks on first run; allow on Private networks).
 - `docker compose logs --since 30m syncthing | grep -iE 'connect|error'`.
 
+### Syncthing restarts / OOM-killed during large transfers
+
+`docker inspect fileshare-syncthing-1 --format '{{.State.OOMKilled}} {{.RestartCount}}'` shows
+`true` / a rising count, and transfers restart from the last completed block. The container has
+`mem_limit: 2g` and `GOMEMLIMIT=1536MiB` (Go's GC works to stay under it; 1 GiB was OOM-killed
+while receiving a 1 GiB file). If it still happens, the documented low-memory settings
+(docs.syncthing.net → "Tuning for Low Resources") can be set over the REST API or GUI
+(Actions → Advanced): folder `hashers` and `copiers` = 1, folder `pullerMaxPendingKiB` = 16384,
+option `maxConcurrentIncomingRequestKiB` = 32768. They trade throughput for memory, so raise
+`mem_limit`/`GOMEMLIMIT` first if the host has RAM to spare (keep `GOMEMLIMIT` ~25% below the
+limit). `docker stats fileshare-syncthing-1` shows the live usage.
+
 ### Certificate not issued
 
 - `journalctl -u caddy --since -1h | grep -iE 'acme|certificate|challenge|error'`

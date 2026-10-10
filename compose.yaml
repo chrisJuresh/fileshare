@@ -171,6 +171,9 @@ services:
       # GUI/REST must listen on all container interfaces for the loopback-published port below.
       STGUIADDRESS: 0.0.0.0:8384
       STNOUPGRADE: "1"
+      # Soft heap target for Go's GC, below mem_limit (docs.syncthing.net "Tuning for Low
+      # Resources"). 1 GiB was OOM-killed while receiving a 1 GiB file.
+      GOMEMLIMIT: 1536MiB
       TZ: ${TZ:-UTC}
     read_only: true
     tmpfs:
@@ -195,7 +198,7 @@ services:
       - "${LAN_IP}:22000:22000/udp"
       # GUI/REST: loopback only (the app uses host networking; operators use an SSH tunnel).
       - "127.0.0.1:8384:8384/tcp"
-    mem_limit: 1g
+    mem_limit: 2g
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -m 4 http://127.0.0.1:8384/rest/noauth/health | grep -q OK"]
       interval: 60s
