@@ -4,6 +4,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createContext } from '../bootstrap.js';
 import type { Config } from '../config.js';
+import { getSetting } from '../db/index.js';
+import { latestRuns, pendingRequestCount, requestSnapshot } from './queue.js';
 import { BackupRunner, type RunnerOptions } from './runner.js';
 
 export const HEARTBEAT_FILE = process.env.RUNNER_HEARTBEAT_FILE ?? '/tmp/restic-runner.alive';
@@ -70,6 +72,37 @@ async function main(): Promise<void> {
   await runner.start();
 }
 
+/**
+ * Operator helpers (run inside the restic container):
+ *   node dist/backup/main.js request   queue a manual snapshot (runs outside the pause window)
+ *   node dist/backup/main.js status    print status.restic, disk usage and the latest runs
+ */
+function command(cmd: string): void {
+  const ctx = createContext('restic-cli');
+  try {
+    if (cmd === 'request') {
+      const id = requestSnapshot(ctx.db, 'manual');
+      console.log(JSON.stringify({ requested: id, pending: pendingRequestCount(ctx.db) }));
+    } else {
+      const out = {
+        status: getSetting(ctx.db, 'status.restic') ?? null,
+        disk: getSetting(ctx.db, 'status.disk.restic') ?? null,
+        pending: pendingRequestCount(ctx.db),
+        latest: latestRuns(ctx.db),
+      };
+      console.log(JSON.stringify(out, null, 2));
+    }
+  } finally {
+    ctx.db.close();
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  const cmd = process.argv[2];
+  if (cmd === 'request' || cmd === 'status') command(cmd);
+  else if (cmd === undefined) await main();
+  else {
+    console.error(`unknown command: ${cmd} (expected: request | status)`);
+    process.exit(2);
+  }
 }
