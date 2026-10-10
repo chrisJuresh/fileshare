@@ -554,6 +554,9 @@ sweep runs every 30 s.
 - `webSeeds: false` initially: add the webseed only when no peer has delivered data for ~10 s or no
   peer has the needed pieces, and remove it when peers return
 - Then `file.select()` for each ticked file
+- The torrent's rarity map is wrapped so the rarest-first search skips pieces we already have
+  (WebTorrent 3.0.21 rescans every piece once per owned piece it picks; on a 10 GiB share that
+  stalled peers with the main thread at 100 %)
 
 If browser↔server WebRTC can't be made reliable through NAT, set `WEBRTC_ANNOUNCE_IP` to make the
 tracker append a host candidate `<ip> <WEBRTC_PORT> typ host` to SDPs it relays from the server's
