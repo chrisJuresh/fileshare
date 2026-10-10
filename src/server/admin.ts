@@ -8,6 +8,7 @@ import type { AppContext } from '../context.js';
 import type { IngestService } from '../ingest/index.js';
 import type { P2PService } from '../p2p/index.js';
 import { adminSecurityHeaders } from './headers.js';
+import { QuietLogController } from './log-controller.js';
 
 export async function buildAdminServer(
   ctx: AppContext,
@@ -16,7 +17,7 @@ export async function buildAdminServer(
   const { config, log } = ctx;
   const app = Fastify({
     loggerInstance: log.child({ listener: 'admin' }) as FastifyBaseLogger,
-    disableRequestLogging: true,
+    logController: new QuietLogController(),
     trustProxy: false,
     bodyLimit: 1024 * 1024,
   });

@@ -386,8 +386,13 @@ Security headers (all public responses):
 - `Cross-Origin-Opener-Policy: same-origin`
 - `Permissions-Policy` minimal
 
-HSTS is set by Caddy. Request logging must not log full `/tr/` or `/ws/` URLs: redact the token
-segment.
+HSTS is set by Caddy. Request logging: Fastify's built-in request lines (full URL + client IP) are
+off on both listeners (`server/log-controller.ts`, a `LogController` with request logging disabled;
+5xx errors are still logged, without URL or IP). Each listener logs one line per response itself.
+On the public listener the URL goes through `redactUrl()` (`log.ts`): the `/tr/` and `/ws/` token
+segment becomes `[token]`, `/tr/` query strings are dropped, every `t=` value becomes `[token]`,
+share ids in `/s/<id>` and `/api/s/<id>/…` are cut to their first 4 characters plus `…`, and
+unmatched paths are logged as `[unmatched]`. Client IPs are never logged.
 
 ### 7.2 Admin listener (`src/server/admin.ts`)
 
