@@ -15,7 +15,7 @@ export function excludesFor(config: Config, extraPaths: string[]): string[] {
     if (path.basename(p) === 'syncthing-config') {
       // Syncthing's database (index-v2/ in 2.x, index-v0.14.0.db in 1.x) is rebuilt from the
       // folder contents on restore; only its config, keys and certs are worth keeping.
-      ex.push(`${p}/index-*`, `${p}/*.db`, `${p}/*.db-*`, `${p}/*.log`);
+      ex.push(`${p}/index-*`, `${p}/*.db`, `${p}/*.db-*`, `${p}/*.log`, `${p}/syncthing.lock`);
     }
   }
   return ex;
