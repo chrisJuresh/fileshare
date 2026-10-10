@@ -434,7 +434,8 @@ equal to `ADMIN_BASE_URL`.
 | GET/PUT | `/api/admin/settings` | admin | `{uploadCapBps, uploadCapacityBps}` |
 | POST | `/api/admin/snapshots` | admin | manual snapshot request |
 | POST | `/api/admin/uploads/batches` | ingest | → `{id}` |
-| POST | `/api/admin/uploads/batches/:id/complete` | ingest | the batch's top-level entries become items |
+| GET | `/api/admin/uploads/batches/:id` | ingest | → `{id, status}` (404 unknown). The dashboard keeps its batch id in `localStorage` until `complete` succeeds and reuses it after a reload while it is `open`: a resumed tus upload keeps the metadata it was **created** with, so it always finishes into its original batch. |
+| POST | `/api/admin/uploads/batches/:id/complete` | ingest | the batch's top-level entries become items. Errors carry `{error, message}`: 400 `batch_empty` (no finished file yet), 409 `batch_not_open` (already completed/failed; start a new upload). A tus upload finishing into a batch that is no longer open gets 409 "…already finished; remove the file and add it again". |
 | * | `/api/admin/uploads/tus/*` | ingest | tus 1.0 (`@tus/server` + `@tus/file-store`). Metadata: `batchId`, `relativePath`, `filename`. Clients use 50 MiB chunks. |
 | GET (WS) | `/api/admin/live` | admin | §8 admin stream |
 

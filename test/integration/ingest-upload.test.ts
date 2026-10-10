@@ -143,6 +143,61 @@ describe('web upload (tus)', () => {
     expect(huge.status).toBe(507);
   });
 
+  describe('resumed uploads (dashboard reload)', () => {
+    const meta = (batchId: string, rel: string) =>
+      `batchId ${Buffer.from(batchId).toString('base64')},relativePath ${Buffer.from(rel).toString('base64')}`;
+    const create = async (batchId: string, rel: string, length: number): Promise<string> => {
+      const r = await fetch(base + TUS, { method: 'POST', headers: { 'Tus-Resumable': '1.0.0', 'Upload-Length': String(length), 'Upload-Metadata': meta(batchId, rel) } });
+      expect(r.status).toBe(201);
+      return base + r.headers.get('location')!;
+    };
+    // A resumed PATCH carries no metadata: the server uses what the upload was created with.
+    const patch = (url: string, offset: number, body: Buffer) =>
+      fetch(url, { method: 'PATCH', headers: { 'Tus-Resumable': '1.0.0', 'Upload-Offset': String(offset), 'Content-Type': 'application/offset+octet-stream' }, body });
+    const batchStatus = async (id: string) => {
+      const r = await fetch(`${base}/api/admin/uploads/batches/${id}`);
+      return r.status === 200 ? ((await r.json()) as { status: string }).status : r.status;
+    };
+    const complete = (id: string) => fetch(`${base}/api/admin/uploads/batches/${id}/complete`, { method: 'POST' });
+
+    it('a remembered open batch is reused, so the resumed file and the completion meet', async () => {
+      const batchId = await newBatch();
+      const data = randomBytes(100_000);
+      const url = await create(batchId, 'resumed.bin', data.length);
+      expect((await patch(url, 0, data.subarray(0, 40_000))).status).toBe(204);
+      // reload: the dashboard asks whether its remembered batch is still open, and reuses it
+      expect(await batchStatus(batchId)).toBe('open');
+      expect((await patch(url, 40_000, data.subarray(40_000))).status).toBe(204);
+      const done = await complete(batchId);
+      expect(done.status).toBe(200);
+      expect(((await done.json()) as { itemIds: string[] }).itemIds).toHaveLength(1);
+      expect(await batchStatus(batchId)).toBe('ingested');
+      expect(await batchStatus('c'.repeat(26))).toBe(404);
+    });
+
+    it('explains an empty round and a resumed upload whose round was already completed', async () => {
+      const empty = await newBatch();
+      const r = await complete(empty);
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: 'batch_empty', message: expect.stringMatching(/no finished files/) });
+
+      const batchId = await newBatch();
+      const first = randomBytes(1000);
+      const u1 = await create(batchId, 'one.bin', first.length);
+      expect((await patch(u1, 0, first)).status).toBe(204);
+      const second = randomBytes(2000);
+      const u2 = await create(batchId, 'two.bin', second.length);
+      expect((await patch(u2, 0, second.subarray(0, 500))).status).toBe(204);
+      expect((await complete(batchId)).status).toBe(200);
+      const late = await patch(u2, 500, second.subarray(500));
+      expect(late.status).toBe(409);
+      expect(await late.text()).toMatch(/already finished/);
+      const again = await complete(batchId);
+      expect(again.status).toBe(409);
+      expect(await again.json()).toMatchObject({ error: 'batch_not_open', message: expect.stringMatching(/start a new upload/) });
+    });
+  });
+
   it('refuses to complete an empty or unknown batch', async () => {
     const batchId = await newBatch();
     expect((await fetch(`${base}/api/admin/uploads/batches/${batchId}/complete`, { method: 'POST' })).status).toBe(400);

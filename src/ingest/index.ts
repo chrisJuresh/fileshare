@@ -840,7 +840,9 @@ class Ingest implements IngestService {
   async completeBatch(batchId: string): Promise<{ itemIds: string[] }> {
     const batch = this.db.prepare('SELECT status FROM upload_batches WHERE id = ?').get(batchId) as { status: string } | undefined;
     if (!batch) throw new UploadsHttpError(404, 'not_found');
-    if (batch.status !== 'open' && batch.status !== 'complete') throw new UploadsHttpError(409, 'batch_not_open');
+    if (batch.status !== 'open' && batch.status !== 'complete') {
+      throw new UploadsHttpError(409, 'batch_not_open', 'this upload round was already added to the library (or failed); start a new upload');
+    }
     const dir = safeJoin(this.cfg.paths.staging, batchId);
     let entries: string[] = [];
     try {
@@ -849,7 +851,9 @@ class Ingest implements IngestService {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     if (batch.status === 'open') {
-      if (entries.length === 0) throw new UploadsHttpError(400, 'batch_empty');
+      if (entries.length === 0) {
+        throw new UploadsHttpError(400, 'batch_empty', 'no finished files in this upload round yet; finish or retry the uploads, then try again');
+      }
       // Close the batch first: later tus finishes for it are rejected.
       const r = this.db
         .prepare("UPDATE upload_batches SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'open'")
