@@ -36,6 +36,8 @@ export interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;
+  /** Clear the unlock failure counters of a share (admin "reset limits"). */
+  resetUnlockLimits(id: string): void;
   getShare(id: string): ShareDto | undefined;
   listShares(): ShareDto[];
   swarm(shareId: string): SwarmSnapshot | undefined;
@@ -284,6 +286,10 @@ export class P2P implements P2PService {
 
   async repointItem(itemId: string): Promise<void> {
     await this.shares.repointItem(itemId);
+  }
+
+  resetUnlockLimits(id: string): void {
+    this.unlockLimiter.resetShare(id);
   }
 
   getShare(id: string): ShareDto | undefined {

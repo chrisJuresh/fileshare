@@ -48,6 +48,19 @@ describe('UnlockRateLimiter', () => {
     expect((l as unknown as { perIp: Map<string, number[]> }).perIp.size).toBe(0);
   });
 
+  it('resetShare clears per-share and per-IP failures of that share only', () => {
+    const l = new UnlockRateLimiter({ perIp: { max: 2, windowMs: 60_000 }, perShare: { max: 3, windowMs: 60_000 } });
+    for (let i = 0; i < 3; i++) {
+      l.recordFailure('s1', '192.0.2.1');
+      l.recordFailure('s2', '192.0.2.1');
+    }
+    expect(l.check('s1', '192.0.2.1').ok).toBe(false);
+    l.resetShare('s1');
+    expect(l.check('s1', '192.0.2.1').ok).toBe(true);
+    expect(l.check('s1', '192.0.2.2').ok).toBe(true);
+    expect(l.check('s2', '192.0.2.1').ok).toBe(false);
+  });
+
   it('does not keep raw IPs as keys', () => {
     const l = new UnlockRateLimiter();
     l.recordFailure('s', '192.0.2.77');

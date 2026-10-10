@@ -78,6 +78,13 @@ export class UnlockRateLimiter {
     };
   }
 
+  /** Admin action: forget every recorded failure for a share (per-share and per-IP counters). */
+  resetShare(shareId: string): void {
+    this.perShare.delete(shareId);
+    const prefix = `${shareId}\n`;
+    for (const k of this.perIp.keys()) if (k.startsWith(prefix)) this.perIp.delete(k);
+  }
+
   /** Drop expired entries (run periodically). */
   prune(): void {
     const now = this.now();

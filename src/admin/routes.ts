@@ -163,6 +163,15 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     return { ok: true };
   });
 
+  api.post('/shares/:id/reset-limits', async (req) => {
+    const { id } = parse(idParam, req.params);
+    parse(EmptyBody, req.body ?? undefined);
+    if (!shareRow(ctx, id)) throw new HttpError(404, 'not_found');
+    p2p.resetUnlockLimits(id);
+    req.log.info({ admin: req.adminEmail ? 'yes' : 'service' }, 'admin: share unlock limits reset');
+    return { ok: true };
+  });
+
   api.get('/shares/:id/events', async (req) => {
     const { id } = parse(idParam, req.params);
     if (!shareRow(ctx, id)) throw new HttpError(404, 'not_found');

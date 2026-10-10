@@ -209,6 +209,13 @@ describe('shares', () => {
     expect((await call('POST', '/api/admin/shares/unknown/revoke')).statusCode).toBe(404);
   });
 
+  it('resets the unlock limits of a share', async () => {
+    const id = insertShare(h.ctx, insertItem(h.ctx), { password: 'p' });
+    expect((await call('POST', `/api/admin/shares/${id}/reset-limits`)).statusCode).toBe(200);
+    expect(h.p2p.calls.at(-1)).toEqual({ method: 'resetUnlockLimits', args: [id] });
+    expect((await call('POST', '/api/admin/shares/unknown/reset-limits')).statusCode).toBe(404);
+  });
+
   it('returns share events', async () => {
     const id = insertShare(h.ctx, insertItem(h.ctx));
     const r = await call('GET', `/api/admin/shares/${id}/events`);

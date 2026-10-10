@@ -225,6 +225,15 @@ Common causes: the PC went to sleep or lost Wi-Fi mid-transfer (completion < 100
 the PC keeps writing into the folder; `SYNCTHING_PC_DEVICE_ID` is empty or wrong (re-run
 `scripts/pair-pc.sh`); a file is ignored on one side only (the `.stignore` lists must match).
 
+### Recipient locked out of a password share
+
+Wrong passwords are limited to 5 per 10 minutes per recipient and 50 per hour per share (§7.1 in
+ARCHITECTURE). Someone guessing can therefore lock out the real recipient for up to an hour. If
+that happens: Dashboard → Shares → **Reset limits** on that share (or `POST
+/api/admin/shares/<id>/reset-limits`). It clears the counters for every recipient of that share.
+If the guessing continues, change the password (Edit) or revoke the link and create a new one —
+a new link has a new id.
+
 ### Syncthing not connected
 
 - `st /rest/system/connections` shows the PC with `connected: false`.

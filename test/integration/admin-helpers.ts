@@ -161,6 +161,9 @@ export class FakeP2P implements P2PService {
     this.ctx.db.prepare('UPDATE shares SET revoked_at = ? WHERE item_id = ? AND revoked_at IS NULL').run(Date.now(), itemId);
   }
   async repointItem(): Promise<void> {}
+  resetUnlockLimits(id: string): void {
+    this.calls.push({ method: 'resetUnlockLimits', args: [id] });
+  }
   getShare(id: string): ShareDto | undefined {
     const row = this.ctx.db.prepare('SELECT * FROM shares WHERE id = ?').get(id) as ShareRow | undefined;
     return row ? this.dto(row) : undefined;

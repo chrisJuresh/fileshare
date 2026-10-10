@@ -418,6 +418,7 @@ equal to `ADMIN_BASE_URL`.
 | POST | `/api/admin/shares` | admin→p2p | `{itemId, password?: string, expiresAt?: number}` → `ShareDto` (incl. `url`) |
 | PATCH | `/api/admin/shares/:id` | admin→p2p | `{password?: string|null, expiresAt?: number|null}`. `null` clears; absent = unchanged. Changing the password bumps `token_version`. |
 | POST | `/api/admin/shares/:id/revoke` | admin→p2p | |
+| POST | `/api/admin/shares/:id/reset-limits` | admin→p2p | clears the share's unlock failure counters (per share and per client); 404 for unknown ids |
 | GET | `/api/admin/shares/:id/events` | admin | history |
 | GET | `/api/admin/stats` | admin | `StatsDto`: totals, per share, upload now vs cap, peak swarm |
 | GET | `/api/admin/status` | admin | disks, restic status, Syncthing connection, versions |
@@ -622,6 +623,7 @@ interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;          // after rename: fix seedlinks
+  resetUnlockLimits(id: string): void;                 // admin "reset limits"
   swarm(shareId: string): SwarmSnapshot | undefined;
   allSwarms(): Record<string, SwarmSnapshot>;
   limiter: UploadLimiter;
