@@ -99,6 +99,8 @@ function migrate(db: Db): void {
     if (applied.has(version)) continue;
     const sql = readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8');
     db.transaction(() => {
+      // Re-check inside the IMMEDIATE transaction: another process may have applied it meanwhile.
+      if (db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?').get(version)) return;
       db.exec(sql);
       db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(version, Date.now());
     }).immediate();
