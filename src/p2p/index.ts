@@ -7,8 +7,8 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Transform } from 'node:stream';
+import { effectiveCapBps, KEY_CAPACITY } from '../admin/settings.js';
 import type { AppContext } from '../context.js';
-import { getSetting } from '../db/index.js';
 import type { ShareDto, SwarmSnapshot } from '../types.js';
 import { Limiter } from './limiter.js';
 import { DEFAULT_UNLOCK_LIMITS, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
@@ -120,8 +120,9 @@ export class P2P implements P2PService {
   }
 
   private applyCap(): void {
-    const v = getSetting<unknown>(this.ctx.db, CAP_SETTING);
-    this.limiter.setRate(typeof v === 'number' ? v : Number.POSITIVE_INFINITY);
+    // The same rule the admin settings report (§3): upload.cap_bps, else floor(0.9 × upload.capacity_bps),
+    // else unlimited (0 → Infinity).
+    this.limiter.setRate(effectiveCapBps(this.ctx.db) || Number.POSITIVE_INFINITY);
     this.log.info({ capBps: this.limiter.rate() }, 'upload cap applied');
   }
 
@@ -131,7 +132,7 @@ export class P2P implements P2PService {
     this.applyCap();
     this.unsubs.push(
       this.ctx.events.on('settings.changed', ({ key }) => {
-        if (key === CAP_SETTING) this.applyCap();
+        if (key === CAP_SETTING || key === KEY_CAPACITY) this.applyCap();
       }),
       this.ctx.events.on('share.changed', ({ shareId }) => void this.reconcile(shareId)),
     );
