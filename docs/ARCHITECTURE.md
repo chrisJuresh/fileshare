@@ -110,7 +110,9 @@ uses `path: /state/seedlinks/<shareId>`, so a share's frozen torrent name keeps 
 item is renamed on disk.
 
 Ownership: everything is owned by `${PUID}:${PGID}`, and data dirs are `0750` (no group/other
-write). All containers run as `${PUID}:${PGID}`.
+write). All containers run as `${PUID}:${PGID}`. At startup, before p2p or ingest start, the app
+creates any missing `library/`, `outbox/`, `staging/`, `uploads/` and `/state/seedlinks/` (mode
+`0750`; `src/core/dirs.ts`).
 
 ## 3. SQLite schema
 

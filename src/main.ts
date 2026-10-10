@@ -1,4 +1,5 @@
 import { createContext } from './bootstrap.js';
+import { ensureDirs } from './core/dirs.js';
 import { createIngest } from './ingest/index.js';
 import { createP2P } from './p2p/index.js';
 import { buildAdminServer } from './server/admin.js';
@@ -6,6 +7,9 @@ import { buildPublicServer } from './server/public.js';
 
 const ctx = createContext('app');
 const { config, log } = ctx;
+
+// Before any service: the seeder resolves the library's realpath at start, ingest scans the outbox.
+await ensureDirs(config.paths);
 
 const p2p = createP2P(ctx);
 const ingest = createIngest(ctx, { p2p });
