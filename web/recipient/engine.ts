@@ -264,7 +264,11 @@ export class Engine {
     const t = this.torrent;
     const files: FileProgress[] = this.info.files.map((f, i) => {
       const wf = this.fileMap[i];
-      return { downloaded: wf ? Math.min(f.length, wf.downloaded) : 0, done: wf?.done ?? false };
+      // WebTorrent 3.0.21's `file.downloaded` subtracts a whole piece from a file that ends exactly on
+      // a piece boundary (lib/file.js, "irrelevantLastPieceBytes"), so such files never showed 100 %.
+      // A done file is complete by definition.
+      const downloaded = !wf ? 0 : wf.done ? f.length : Math.min(f.length, wf.downloaded);
+      return { downloaded, done: wf?.done ?? false };
     });
     let selectedBytes = 0;
     let doneBytes = 0;
