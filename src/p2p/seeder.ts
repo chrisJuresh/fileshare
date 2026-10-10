@@ -9,6 +9,7 @@ import { isIP } from 'node:net';
 import WebTorrentImpl from 'webtorrent';
 import type { AppContext } from '../context.js';
 import type { ShareRow } from '../db/index.js';
+import { installIceGatheringFix } from './ice.js';
 import type { Limiter } from './limiter.js';
 import { bencode } from './vendor.js';
 import type { ShareStore } from './shares.js';
@@ -115,6 +116,8 @@ export class Seeder {
   async start(): Promise<void> {
     if (this.client) return;
     this.libraryReal = await realpath(this.ctx.config.paths.library);
+    // Answer WebRTC offers as soon as ICE gathering is complete (not after simple-peer's 5 s timer).
+    installIceGatheringFix();
     const rtcConfig = {
       iceServers: this.opts.stunUrls.map((urls) => ({ urls })),
       portRangeBegin: this.opts.webrtcPort,
