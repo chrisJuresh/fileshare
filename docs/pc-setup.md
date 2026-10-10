@@ -183,9 +183,14 @@ Invoke-RestMethod "$api/rest/db/completion?folder=$folderId&device=$serverId" -H
 Expected:
 
 1. `completion` reaches 100 within seconds (LAN).
-2. About 2–3 minutes later the item shows as **ready** in the admin dashboard (stable 2 min,
-   hashed, snapshotted).
-3. Shortly after that, the `fileshare-test-…` folder **disappears** from the outbox.
+2. About **4–6 minutes** later the item shows as **ready** in the admin dashboard. The server
+   waits until the folder has been unchanged for 2 minutes, hashes it (seconds for this size),
+   requests a snapshot, waits the 2-minute snapshot debounce plus up to ~10 s for the snapshot
+   runner to pick it up, and then the backup itself runs. Meanwhile it shows `stabilising`,
+   `hashing`, then `snapshotting`.
+3. The `fileshare-test-…` folder **disappears** from the outbox (on the server, then on the PC a
+   few seconds later via Syncthing) **just before** the item turns ready: it is removed only once
+   a snapshot covers it, and that is the last step.
 4. Optional end-to-end check: create a share for it, download it in a browser, run
    `Get-FileHash` on the downloaded files and compare with the hashes above. Then delete the test
    item in the dashboard.

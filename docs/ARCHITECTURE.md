@@ -508,6 +508,9 @@ server → client (every ~1.5 s, and on change):
   only if that peer announced `started`/an update before. Bounds per share: at most 1000
   remembered peers per map (oldest evicted) and at most 200 counted completions per rolling hour.
 * **No IPs anywhere in any message, log line at info level or DB row.**
+* **Privacy, inherent to P2P:** recipients in the same swarm see each other's IP addresses (WebRTC
+  ICE candidates relayed by the tracker; HTTP tracker peer lists for torrent clients). The app never
+  stores or displays them. README and the share page (under the swarm table) say so.
 
 **Admin: `wss://<admin>/api/admin/live`** (JWT checked on upgrade), server → client every ~2 s:
 ```jsonc

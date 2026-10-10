@@ -101,8 +101,12 @@ ls -la "/srv/fileshare-restore/data/library/<item name>"
 
 Then either:
 
-- **Re-ingest it as a new item:** move it into `${DATA_ROOT}/outbox/` (same filesystem) or upload
-  it from the dashboard. It goes through the normal ingest (hash, snapshot) and you share it again.
+- **Bring it back as a new item:** upload it from the dashboard's Upload tab (copy it to a machine
+  with a browser first, e.g. `scp -r`). It goes through the normal ingest (hash, snapshot) and you
+  share it again. **Don't** move it into `${DATA_ROOT}/outbox/`: that is a Send & Receive folder,
+  so Syncthing would first sync the whole item to the PC (ingest waits for the PC to report 100%),
+  and both copies are removed again after the snapshot. There is no CLI to register files placed
+  directly in the library.
 - **Repair a damaged library entry in place** (the item still exists in the dashboard, same name):
   stop the app (`docker compose stop app`), replace `${DATA_ROOT}/library/<item name>` with the
   restored copy (`cp -a`), then `docker compose start app`. Existing shares keep working, because the

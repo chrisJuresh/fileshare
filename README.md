@@ -22,6 +22,11 @@ upload once per person.
 - **Admin:** a dashboard behind Cloudflare Access (via a Cloudflare Tunnel) for items, shares,
   live swarm stats, upload cap, disks and snapshot status. The public site never serves admin routes.
 
+**Privacy note:** peer-to-peer means recipients of the same link connect to each other, so their
+IP addresses are visible to the other peers in that swarm (WebRTC connection candidates, tracker
+peer lists for torrent apps). The app itself never stores, logs or displays IP addresses; the share
+page's swarm list shows only nicknames or "Friend N".
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 ## Quickstart
