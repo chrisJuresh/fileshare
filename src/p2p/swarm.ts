@@ -21,6 +21,19 @@ const MAX_MSG_CHARS = 4096;
 const ANNOUNCE_TTL_MS = { http: 25 * 60_000, ws: 5 * 60_000 } as const;
 const PEER_ID_RE = /^[0-9a-f]{40}$/;
 const MAX_NUM = 1e15;
+/** Per-share bound on remembered peers (announces, upload ledger, completions); oldest evicted. */
+export const MAX_PEERS_PER_SHARE = 1000;
+/** Per-share bound on counted completions per rolling hour (announce/stats spam can't inflate it). */
+export const MAX_COMPLETIONS_PER_HOUR = 200;
+const HOUR_MS = 3600_000;
+
+/** Make room for one new key: drop the oldest (first-inserted) entries until size < max. */
+function evictOldest(m: Map<string, unknown> | Set<string>, max: number): void {
+  for (const k of m.keys()) {
+    if (m.size < max) return;
+    m.delete(k);
+  }
+}
 
 /** Trim, strip control/format characters, collapse whitespace, cap at 24 characters. */
 export function sanitizeNick(raw: unknown): string | undefined {
@@ -54,6 +67,8 @@ interface AnnouncedPeer {
   left: number;
   uploaded: number;
   lastSeen: number;
+  /** Sent a non-`completed` announce (started/update) before: only such a peer can complete. */
+  begun: boolean;
 }
 
 interface Pending {
@@ -74,8 +89,12 @@ class ShareSwarm {
   readonly announced = new Map<string, AnnouncedPeer>();
   /** Last row + time it was last current, for the 30 s linger. */
   readonly recent = new Map<string, { row: SwarmPeer; at: number }>();
+  /** Upload ledger and completions are kept until the share becomes inactive (not on idle), so a
+   * peer that comes back after an idle gap is not counted twice. Both are bounded. */
   readonly lastUploaded = new Map<string, number>();
   readonly completed = new Set<string>();
+  /** Times of counted completions in the last hour (rate cap). */
+  completionTimes: number[] = [];
   readonly sockets = new Set<LiveSocket>();
   readonly webseedMeter = new RateMeter();
   pending: Pending = { webseed: 0, p2p: 0, peerBytes: 0, completed: 0, peak: 0, lastActivity: null };
@@ -86,12 +105,14 @@ class ShareSwarm {
   n(peerId: string): number {
     let n = this.ids.get(peerId);
     if (n === undefined) {
+      evictOldest(this.ids, 4 * MAX_PEERS_PER_SHARE);
       n = this.nextN++;
       this.ids.set(peerId, n);
     }
     return n;
   }
 
+  /** Nothing live and nothing pending. The ledger (lastUploaded/completed) may still be set. */
   isIdle(): boolean {
     const p = this.pending;
     return (
@@ -164,6 +185,7 @@ export class SwarmStats {
     const prev = s.lastUploaded.get(peerId) ?? 0;
     if (uploaded > prev) {
       s.pending.peerBytes += Math.min(uploaded - prev, MAX_NUM);
+      if (!s.lastUploaded.has(peerId)) evictOldest(s.lastUploaded, MAX_PEERS_PER_SHARE);
       s.lastUploaded.set(peerId, uploaded);
       s.pending.lastActivity = this.now();
     }
@@ -171,6 +193,11 @@ export class SwarmStats {
 
   private markCompleted(s: ShareSwarm, peerId: string, kind: 'browser' | 'client'): void {
     if (s.completed.has(peerId)) return;
+    const now = this.now();
+    s.completionTimes = s.completionTimes.filter((t) => now - t < HOUR_MS);
+    if (s.completionTimes.length >= MAX_COMPLETIONS_PER_HOUR) return;
+    s.completionTimes.push(now);
+    evictOldest(s.completed, MAX_PEERS_PER_SHARE);
     s.completed.add(peerId);
     s.pending.completed += 1;
     s.pending.lastActivity = this.now();
@@ -188,9 +215,14 @@ export class SwarmStats {
       s.announced.delete(a.peerId);
       return;
     }
-    s.announced.set(a.peerId, { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now() });
+    // Only a peer that announced before can complete (a lone `event=completed` is not a download).
+    const prev = s.announced.get(a.peerId);
+    if (prev) s.announced.delete(a.peerId); // re-insert below: keeps the map ordered oldest-first
+    else evictOldest(s.announced, MAX_PEERS_PER_SHARE);
+    const begun = prev?.begun === true;
+    s.announced.set(a.peerId, { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now(), begun: begun || a.event !== 'complete' });
     this.peerUploaded(s, a.peerId, a.uploaded);
-    if (a.event === 'complete') this.markCompleted(s, a.peerId, a.type === 'ws' ? 'browser' : 'client');
+    if (a.event === 'complete' && begun) this.markCompleted(s, a.peerId, a.type === 'ws' ? 'browser' : 'client');
     s.pending.lastActivity = this.now();
   }
 
@@ -386,10 +418,13 @@ export class SwarmStats {
         s.browsers.clear();
         s.announced.clear();
         s.recent.clear();
+        s.lastUploaded.clear();
+        s.completed.clear();
       } else {
         this.broadcast(s, snap);
       }
-      if (s.isIdle()) this.states.delete(id);
+      // An active share keeps its ledger while idle; only drop state that holds nothing at all.
+      if (s.isIdle() && s.lastUploaded.size === 0 && s.completed.size === 0) this.states.delete(id);
     }
   }
 

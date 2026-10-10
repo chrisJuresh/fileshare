@@ -481,6 +481,11 @@ server → client (every ~1.5 s, and on change):
 * Torrent-client rows take progress from the seeder's `wire.peerPieces` bitfield when connected,
   otherwise from the tracker announce's `left`.
 * Peers that disconnect are removed after 30 s.
+* Accounting: `peer_bytes` counts the increase of each peer's reported cumulative `uploaded`, and a
+  completion counts once per peer id. The per-peer ledger is kept while the share is active (also
+  across idle periods) and dropped when it becomes inactive. A tracker `completed` event counts
+  only if that peer announced `started`/an update before. Bounds per share: at most 1000
+  remembered peers per map (oldest evicted) and at most 200 counted completions per rolling hour.
 * **No IPs anywhere in any message, log line at info level or DB row.**
 
 **Admin: `wss://<admin>/api/admin/live`** (JWT checked on upgrade), server → client every ~2 s:

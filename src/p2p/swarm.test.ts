@@ -189,3 +189,58 @@ describe('live stats socket', () => {
     expect(Object.keys(p2p.allSwarms())).not.toContain(share.id);
   });
 });
+
+describe('swarm accounting under churn and spam', () => {
+  const pid = (n: number) => n.toString(16).padStart(40, '0');
+  const ann = (shareId: string, peerId: string, event: 'start' | 'update' | 'complete' | 'stop', uploaded = 0) =>
+    p2p.stats.onAnnounce({ shareId, peerId, type: 'http', event, left: 0, uploaded, downloaded: 0 });
+  type St = { announced: Map<string, unknown>; lastUploaded: Map<string, number>; completed: Set<string> };
+  const state = (shareId: string) => (p2p.stats as unknown as { states: Map<string, St> }).states.get(shareId);
+
+  it('a peer returning after the share went idle is not counted twice', async () => {
+    const { share } = await newShare();
+    const X = 'cc'.repeat(20);
+    ann(share.id, X, 'start', 1000);
+    ann(share.id, X, 'complete', 1000);
+    ann(share.id, X, 'stop');
+    p2p.stats.flush();
+    await sleep(800); // > lingerMs + a few ticks: the live state is idle now
+    p2p.stats.flush();
+    ann(share.id, X, 'start', 1000);
+    ann(share.id, X, 'complete', 1000);
+    p2p.stats.flush();
+    const st = p2p.getShare(share.id)!.stats;
+    expect(st.peerBytes).toBe(1000);
+    expect(st.completedDownloads).toBe(1);
+    // Revoking (inactive) drops the ledger with the rest of the state.
+    await p2p.revokeShare(share.id);
+    await waitFor(() => {
+      p2p.stats.flush();
+      return state(share.id) === undefined;
+    }, 3000);
+  });
+
+  it('a completion counts only for a peer that announced before', async () => {
+    const { share } = await newShare();
+    ann(share.id, pid(1), 'complete');
+    ann(share.id, pid(1), 'complete');
+    p2p.stats.flush();
+    expect(p2p.getShare(share.id)!.stats.completedDownloads).toBe(0);
+  });
+
+  it('bounds remembered peers and completions per hour', async () => {
+    const { share } = await newShare();
+    for (let i = 1; i <= 1200; i++) {
+      ann(share.id, pid(i), 'start', 10);
+      ann(share.id, pid(i), 'complete', 10);
+    }
+    const s = state(share.id)!;
+    expect(s.announced.size).toBeLessThanOrEqual(1000);
+    expect(s.lastUploaded.size).toBeLessThanOrEqual(1000);
+    expect(s.completed.size).toBeLessThanOrEqual(1000);
+    p2p.stats.flush();
+    expect(p2p.getShare(share.id)!.stats.completedDownloads).toBe(200);
+    const events = env.ctx.db.prepare("SELECT COUNT(*) AS n FROM share_events WHERE share_id = ? AND type = 'completed'").get(share.id) as { n: number };
+    expect(events.n).toBe(200);
+  });
+});
