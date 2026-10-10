@@ -109,6 +109,13 @@ test.describe('P2P from the seeder', () => {
     // Live table shows us.
     await expect(page.locator('table.swarm tr.you')).toBeVisible();
     await expect.poll(() => mock.stats.live.some((c) => c.stats?.done === true && c.stats.progress === 1)).toBe(true);
+
+    // Nickname goes to the live socket and is remembered in localStorage (not the token).
+    await page.getByLabel('Nickname (optional, up to 24 characters)').fill('Synthetic Sam');
+    await page.getByRole('button', { name: 'Set' }).click();
+    await expect.poll(() => mock.stats.live.map((c) => c.nick)).toContain('Synthetic Sam');
+    await expect(page.locator('table.swarm tr.you')).toContainText('Synthetic Sam');
+    expect(await page.evaluate(() => localStorage.getItem('fileshare.nick'))).toBe('Synthetic Sam');
   });
 });
 

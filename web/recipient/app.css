@@ -309,6 +309,7 @@ summary:focus-visible {
 }
 
 .node .meta {
+  margin-left: auto;
   color: var(--muted);
   font-size: 0.875rem;
   white-space: nowrap;

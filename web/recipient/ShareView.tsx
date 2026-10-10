@@ -197,6 +197,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
       setProblem("We couldn't open that folder. Please pick another one (for example, Downloads).");
       return;
     }
+    void requestPersist(); // Chromium decides silently; persistence protects the piece store from eviction
     const sp = await checkStorage(true);
     if (sp) setStorage(sp); // warn, but try anyway (Chromium usually has plenty)
     const indices = selectedList();
@@ -227,7 +228,17 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     const engine = engineRef.current;
     if (!engine || selected.size === 0) return;
     setProblem(null);
-    const persisted = await requestPersist(); // first: may show a permission prompt tied to the click
+    // First, while we still have the click's user activation. Firefox may show a permission prompt
+    // that the user answers later (or never), so don't wait for it for long.
+    const persistRequest = requestPersist();
+    const persisted = await Promise.race([persistRequest, new Promise<boolean>((r) => setTimeout(() => r(false), 1500))]);
+    if (!persisted) {
+      void persistRequest.then(async (granted) => {
+        if (!granted) return;
+        // Granted later: re-check, and drop the storage warning if it no longer applies.
+        if (!(await checkStorage(true))) setStorage(null);
+      });
+    }
     if (!force) {
       const sp = await checkStorage(persisted);
       if (sp) {

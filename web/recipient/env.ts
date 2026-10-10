@@ -65,9 +65,9 @@ export function hasWebRTC(): boolean {
 
 export function isPhone(): boolean {
   const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-  const small = Math.min(window.innerWidth, window.screen?.width ?? window.innerWidth) < 600;
+  const smallScreen = (window.screen?.width ?? window.innerWidth) < 600;
   const ua = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  return ua || (coarse && small);
+  return ua || coarse || smallScreen;
 }
 
 export async function storageEstimate(): Promise<{ quota: number; usage: number } | null> {
