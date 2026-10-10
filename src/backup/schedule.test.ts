@@ -105,6 +105,18 @@ describe('backup triggers', () => {
     expect(backupTrigger(state({ now, lastOkBackupStartedAt: null }), cfg)).toBe('hourly');
   });
 
+  it('a manual request made after the last failure bypasses the back-off (once)', () => {
+    const failedAt = now - 2 * MIN;
+    const base = state({ now, backupNotBefore: now + 3 * MIN, lastBackupFailedAt: failedAt });
+    const pending = (manualNewestAt?: number) => ({ count: 1, oldestAt: now - 3 * MIN, newestAt: now, manual: manualNewestAt !== undefined, manualNewestAt });
+    expect(backupTrigger({ ...base, pending: pending(now - MIN) }, cfg)).toBe('manual');
+    expect(backupTrigger({ ...base, pending: pending(failedAt) }, cfg)).toBeNull(); // the request that just failed
+    expect(backupTrigger({ ...base, pending: pending(failedAt - MIN) }, cfg)).toBeNull();
+    expect(backupTrigger({ ...base, pending: pending(undefined) }, cfg)).toBeNull(); // not manual
+    // Still nothing inside the pause window.
+    expect(nextJob({ ...base, now: WED(3, 50), pending: pending(WED(3, 49)), lastBackupFailedAt: WED(3, 0), backupNotBefore: WED(4, 0) }, cfg)).toBeNull();
+  });
+
   it('respects the failure back-off', () => {
     const s = state({ now, lastOkBackupStartedAt: null, backupNotBefore: now + 1 });
     expect(backupTrigger(s, cfg)).toBeNull();

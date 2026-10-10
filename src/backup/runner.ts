@@ -140,17 +140,24 @@ export class BackupRunner {
     const pending = db
       .prepare(
         `SELECT COUNT(*) AS count, MIN(requested_at) AS oldestAt, MAX(requested_at) AS newestAt,
-                MAX(reason = 'manual') AS manual
+                MAX(reason = 'manual') AS manual,
+                MAX(CASE WHEN reason = 'manual' THEN requested_at END) AS manualNewestAt
          FROM backup_requests WHERE run_id IS NULL`,
       )
-      .get() as { count: number; oldestAt: number | null; newestAt: number | null; manual: number | null };
+      .get() as { count: number; oldestAt: number | null; newestAt: number | null; manual: number | null; manualNewestAt: number | null };
     const lastStarted = (sql: string): number | null =>
       (db.prepare(sql).get() as { t: number | null } | undefined)?.t ?? null;
     return {
       now: this.now(),
       pending:
         pending.count > 0
-          ? { count: pending.count, oldestAt: pending.oldestAt!, newestAt: pending.newestAt!, manual: pending.manual === 1 }
+          ? {
+              count: pending.count,
+              oldestAt: pending.oldestAt!,
+              newestAt: pending.newestAt!,
+              manual: pending.manual === 1,
+              ...(pending.manualNewestAt !== null ? { manualNewestAt: pending.manualNewestAt } : {}),
+            }
           : null,
       lastOkBackupStartedAt: lastStarted(`SELECT MAX(started_at) AS t FROM backup_runs WHERE kind = 'backup' AND status = 'ok'`),
       lastForgetStartedAt: lastStarted(
@@ -161,6 +168,7 @@ export class BackupRunner {
       ),
       firstRunAt: lastStarted(`SELECT MIN(started_at) AS t FROM backup_runs`),
       backupNotBefore: this.backupNotBefore,
+      lastBackupFailedAt: lastStarted(`SELECT MAX(started_at) AS t FROM backup_runs WHERE kind = 'backup' AND status = 'failed'`),
     };
   }
 

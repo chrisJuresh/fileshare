@@ -330,6 +330,9 @@ The `restic` service runs `node dist/backup/main.js`. It talks to the app **only
   `SNAPSHOT_DEBOUNCE_SECONDS` (120) old, or the oldest one is ≥ 10 min old.
 * **Hourly:** run a backup if the last successful backup started more than 60 min ago (and anything
   changed, or always; restic dedups).
+* **Failure back-off:** after a failed backup, the next one waits 5, 10, 20, 40, then 60 min. A
+  `manual` request made after the last failed backup started bypasses the back-off once (if that
+  run fails too, the request is older than the new failure and waits like the others).
 * **Pause window `SNAPSHOT_PAUSE_WINDOW` = `03:45-05:15` (local `TZ`):**
   - No job starts in `[pause_start − 15 min, pause_end)`.
   - A job still running at `pause_start` gets SIGINT (status `interrupted`).

@@ -70,7 +70,9 @@ Dashboard → "Snapshot now", or:
 docker compose exec restic node dist/backup/main.js request
 ```
 
-It runs within ~10 s, unless another job is running or the pause window is active.
+It runs within ~10 s, unless another job is running or the pause window is active. This also
+applies after a failed backup: a manual request skips the failure back-off once (fix the cause
+first; if it fails again, the next automatic retry follows the back-off).
 
 ### List and browse
 
@@ -292,7 +294,7 @@ browser↔server WebRTC worked with STUN only, and whether `WEBRTC_ANNOUNCE_IP` 
   window is active (`SNAPSHOT_PAUSE_WINDOW`, local `TZ`, plus 15 minutes before it). Requests
   queue up and run after it ends.
 - A failed backup is retried after 5, 10, 20, 40, then every 60 minutes. The error is in
-  `status.error` and in the dashboard.
+  `status.error` and in the dashboard. After fixing the cause, "Snapshot now" retries at once.
 - Exit code 3 ("some files could not be read") outside the library is accepted with a warning;
   inside the library it fails the run, and ingest waits. Fix permissions (everything must be
   readable by `PUID`).
