@@ -560,6 +560,11 @@ also used by the dashboard/stats/live): `upload.cap_bps` if set, else `floor(0.9
 if a capacity is known, else unlimited. It is re-applied live on `settings.changed` for either key.
 `currentBps()` is a 2 s moving average used by stats.
 
+The group's bucket is a FIFO token bucket (`FairBucket`): waiting requests are granted in arrival
+order, so seeder wires (16 KiB blocks) cannot starve webseed responses (64 KiB). It holds only
+¼ s of tokens (at least 256 KiB), so over any window of T seconds the server sends at most about
+`cap × (T + 0.25)`; short averages after an idle period stay close to the cap.
+
 ## 11. P2P settings (verified against webtorrent 3.0.21)
 
 **Server client:**
@@ -570,6 +575,10 @@ if a capacity is known, else unlimited. It is re-applied live on `settings.chang
 - `uploads` raised (e.g. 64)
 - `storeCacheSlots` 0–4
 - `secure` per measurement (see notes)
+
+- `p2p/ice.ts` patches simple-peer so the server's WebRTC answers go out when ICE gathering is
+  complete: webrtc-polyfill never sends the null end-of-candidates event simple-peer waits for, so
+  answers otherwise waited for its 5 s fallback timer (time to first byte ~5.2 s → ~0.2 s).
 
 Torrents are added from stored metainfo with `{ path: /state/seedlinks/<shareId>, skipVerify: true }`.
 Only **active** shares are seeded. They are added and removed on `share.changed`, and an expiry
@@ -585,6 +594,9 @@ in-flight webseed response for the item's shares before the files are removed.
 - `webSeeds: false` initially: add the webseed only when no peer has delivered data for ~10 s or no
   peer has the needed pieces, and remove it when peers return
 - Then `file.select()` for each ticked file
+- The torrent's rarity map is wrapped so the rarest-first search skips pieces we already have
+  (WebTorrent 3.0.21 rescans every piece once per owned piece it picks; on a 10 GiB share that
+  stalled peers with the main thread at 100 %)
 
 If browser↔server WebRTC can't be made reliable through NAT, set `WEBRTC_ANNOUNCE_IP` to make the
 tracker append a host candidate `<ip> <WEBRTC_PORT> typ host` to SDPs it relays from the server's
@@ -665,6 +677,13 @@ registerAdminApi(app: FastifyInstance, ctx: AppContext, deps: { ingest: IngestSe
   with a fake Syncthing REST server and a local JWKS for Access. `full-stack.test.ts` wires the real
   admin listener + ingest + p2p + public listener together (tus upload → ready → share → unlock →
   webseed → revoke → delete); only Syncthing, the restic runner and the Access key server are fakes.
-* **E2E:** Playwright (`test/e2e/`). The app runs via `scripts/test-stack.sh` on non-default ports.
-  It covers 6 Chromium peers, Firefox fallback, enforcement and the upload cap.
+* **E2E:** Playwright (`test/e2e/`, `playwright.config.ts`). A `stack` setup project starts
+  `scripts/test-stack.sh`: the real app (`node dist/main.js`) on loopback 18xxx ports, the restic
+  runner (app image, production mounts, this checkout's `dist/`), real Syncthing "server" + a stand-in
+  "pc" paired with `scripts/pair-pc.sh` (`compose.test.yaml`, project `fileshare-test`), and a local
+  JWKS standing in for Cloudflare Access. All data lives under `FILESHARE_SCRATCH`
+  (`/srv/fileshare-scratch` by default). Specs: `recipient-*` (page against a mock),
+  `stack-swarm` (3 browsers + a torrent client, live tables, no IPs), `stack-enforce`,
+  `stack-firefox`, `stack-cap`, `stack-ingest` (slow copy through Syncthing, snapshot, RUNBOOK
+  restore) and `stack-big` (`@big`: 6 Chromium peers, 10 GiB; `FILESHARE_BIG=1`).
 * **Test data is always synthetic:** random bytes from `scripts/gen-testdata.sh`.

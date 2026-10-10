@@ -161,6 +161,7 @@ export class Engine {
     });
     if (this.torrent !== torrent || torrent.destroyed) return;
 
+    skipOwnedPiecesInRarestSearch(torrent);
     this.mapFiles(torrent);
     for (const i of this.selected) {
       const f = this.fileMap[i];
@@ -264,7 +265,11 @@ export class Engine {
     const t = this.torrent;
     const files: FileProgress[] = this.info.files.map((f, i) => {
       const wf = this.fileMap[i];
-      return { downloaded: wf ? Math.min(f.length, wf.downloaded) : 0, done: wf?.done ?? false };
+      // WebTorrent 3.0.21's `file.downloaded` subtracts a whole piece from a file that ends exactly on
+      // a piece boundary (lib/file.js, "irrelevantLastPieceBytes"), so such files never showed 100 %.
+      // A done file is complete by definition.
+      const downloaded = !wf ? 0 : wf.done ? f.length : Math.min(f.length, wf.downloaded);
+      return { downloaded, done: wf?.done ?? false };
     });
     let selectedBytes = 0;
     let doneBytes = 0;
@@ -328,6 +333,21 @@ export class Engine {
     this.lock = null;
     this.onChange();
   }
+}
+
+/**
+ * Workaround for WebTorrent 3.0.21 with strategy 'rarest' (lib/torrent.js trySelectWire/validateWire,
+ * lib/rarity-map.js): getRarestPiece() also returns pieces we already have. Each one is then rejected
+ * by _request(), marked "tried", and the O(pieces) search runs again — quadratic in the number of
+ * pieces. On a 10 GiB share (2584 pieces) that pinned the page's main thread at 100 % and stalled
+ * downloads for good at ~35 %. Only search pieces we don't have yet. (`_rarityMap` exists from
+ * metadata on, before any file is selected.)
+ */
+export function skipOwnedPiecesInRarestSearch(torrent: WtTorrent): void {
+  const rm = (torrent as unknown as { _rarityMap?: { getRarestPiece?: (filter?: (i: number) => boolean) => number } })._rarityMap;
+  const orig = rm?.getRarestPiece;
+  if (!rm || typeof orig !== 'function') return;
+  rm.getRarestPiece = (filter) => orig.call(rm, (i: number) => !torrent.bitfield?.get(i) && (!filter || filter(i)));
 }
 
 /**
