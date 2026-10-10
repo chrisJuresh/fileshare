@@ -1,0 +1,49 @@
+{
+  "name": "fileshare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\"",
+    "build:web": "node scripts/build-web.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "start": "node dist/main.js",
+    "start:backup": "node dist/backup/main.js"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.6",
+    "@fastify/websocket": "11.3.4",
+    "@tus/file-store": "2.1.1",
+    "@tus/server": "2.4.5",
+    "argon2": "0.45.1",
+    "bencode": "4.0.1",
+    "better-sqlite3": "13.0.3",
+    "bittorrent-tracker": "11.2.3",
+    "create-torrent": "6.1.3",
+    "fastify": "5.12.5",
+    "jose": "6.2.12",
+    "pino": "10.4.0",
+    "webtorrent": "3.0.21",
+    "ws": "8.22.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "@uppy/core": "6.2.0",
+    "@uppy/dashboard": "6.0.1",
+    "@uppy/tus": "6.0.0",
+    "client-zip": "2.5.1",
+    "esbuild": "0.28.2",
+    "preact": "10.29.8",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  }
+}

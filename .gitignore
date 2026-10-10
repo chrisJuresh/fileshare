@@ -1,0 +1,42 @@
+# Local-only agent rules and prompts
+CLAUDE.local.md
+prompts/
+deploy.local.md
+
+# Configuration and secrets (only .env.example is tracked)
+.env*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Runtime data
+data/
+*.sqlite
+*.sqlite-*
+*.db
+
+# Node / build
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+
+# Test output
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.tmp/
+tmp/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
