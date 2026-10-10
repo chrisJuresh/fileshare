@@ -292,7 +292,9 @@ describe('p2p end-to-end', () => {
     await httpAnnounce(u.announce.http, share.infoHash, '-qB0000-bbbbbbbbbbbb');
     expect(p2p.tracker.swarm(share.infoHash)).toBeDefined();
     await waitFor(() => p2p.seeder!.torrent(share.id) === undefined, 5000);
-    expect(p2p.tracker.swarm(share.infoHash)).toBeUndefined();
+    // reconcile() drops the tracker swarm after the seeder's async remove() resolves; under load that
+    // takes longer than one poll, so wait for it instead of asserting in the same tick.
+    await waitFor(() => p2p.tracker.swarm(share.infoHash) === undefined, 5000);
     expect(p2p.getShare(share.id)!.state).toBe('expired');
   });
 
