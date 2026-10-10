@@ -11,6 +11,7 @@ import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { AppContext } from '../context.js';
+import { IpRateLimiter, type Window } from './ratelimit.js';
 import type { ShareStore } from './shares.js';
 import { rewriteServerSignal } from './sdp.js';
 import { bencode, TrackerServerCtor, type TrackerParams, type TrackerServer, type TrackerSwarm } from './vendor.js';
@@ -49,9 +50,18 @@ export interface TrackerOptions {
   /** WEBRTC_ANNOUNCE_IP ('' = off). */
   announceIp: string;
   webrtcPort: number;
+  /** HTTP announce limit per client IP (default ANNOUNCE_LIMIT). */
+  announceLimit?: Window;
+  /** WebSocket tracker connection caps (defaults MAX_WS_PER_SHARE / MAX_WS_TOTAL). */
+  maxWsPerShare?: number;
+  maxWsTotal?: number;
 }
 
 const DENIED = 'access denied';
+/** HTTP announces per client IP per minute (clients normally announce every few minutes). */
+export const ANNOUNCE_LIMIT: Window = { max: 60, windowMs: 60_000 };
+export const MAX_WS_PER_SHARE = 500;
+export const MAX_WS_TOTAL = 5000;
 const PUBLIC_IP_TTL_MS = 5 * 60_000;
 
 /** Strip share tokens / secrets from library messages before they go anywhere near a log. */
@@ -80,6 +90,8 @@ function num(v: unknown): number {
 export class TrackerService {
   readonly server: TrackerServer;
   private readonly sockets = new Map<string, Set<TrackedSocket>>();
+  /** Per-IP HTTP announce limiter (IPs HMAC'd in memory only). */
+  readonly announceLimiter: IpRateLimiter;
   private readonly secret: Buffer;
   private publicIp: { ip: string | undefined; at: number } | undefined;
 
@@ -89,6 +101,7 @@ export class TrackerService {
     private readonly opts: TrackerOptions,
   ) {
     this.secret = Buffer.from(opts.internalSecret);
+    this.announceLimiter = new IpRateLimiter(opts.announceLimit ?? ANNOUNCE_LIMIT);
     this.server = new TrackerServerCtor({
       http: false,
       udp: false,
@@ -197,11 +210,18 @@ export class TrackerService {
 
   async register(app: FastifyInstance): Promise<void> {
     const failure = Buffer.from(bencode.encode({ 'failure reason': DENIED }));
+    const limited = Buffer.from(bencode.encode({ 'failure reason': 'rate limited', interval: 600 }));
+    const perShare = this.opts.maxWsPerShare ?? MAX_WS_PER_SHARE;
+    const total = this.opts.maxWsTotal ?? MAX_WS_TOTAL;
 
     app.route<{ Params: { token: string } }>({
       method: 'GET',
       url: '/tr/:token/announce',
       handler: (req, reply) => {
+        // Our own seeder (internal secret) is never limited; everyone else per client IP.
+        if (!this.parseTokenSegment(req.params.token).isServer && !this.announceLimiter.hit(normalizeIp(req.ip) ?? 'unknown')) {
+          return reply.code(429).header('Retry-After', '60').header('Cache-Control', 'no-store').type('text/plain').send(limited);
+        }
         const c = this.connCtx(req.params.token, req);
         if ('reject' in c) {
           return reply.code(200).header('Cache-Control', 'no-store').type('text/plain').send(failure);
@@ -226,9 +246,13 @@ export class TrackerService {
           s.close(c.reject === 'gone' ? 4404 : 4401, c.reject);
           return;
         }
+        let set = this.sockets.get(c.shareId);
+        if (!c.isServer && ((set?.size ?? 0) >= perShare || this.wsCount() >= total)) {
+          s.close(1013, 'busy');
+          return;
+        }
         s.fsCtx = c;
         s.upgradeReq = req.raw;
-        let set = this.sockets.get(c.shareId);
         if (!set) this.sockets.set(c.shareId, (set = new Set()));
         set.add(s);
         // Registered before the tracker's own close handler, so `peerId` is still set here.
@@ -241,6 +265,13 @@ export class TrackerService {
         this.server.onWebSocketConnection(s);
       },
     });
+  }
+
+  /** Open tracker WebSockets across all shares. */
+  wsCount(): number {
+    let n = 0;
+    for (const set of this.sockets.values()) n += set.size;
+    return n;
   }
 
   /** Live revocation: forget the swarm and disconnect its WebSocket peers. */

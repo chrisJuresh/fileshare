@@ -370,10 +370,10 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/sw.min.js` | server | WebTorrent service worker at root scope (`Service-Worker-Allowed: /`) |
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |
-| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string}` → 200 `UnlockResponse` (§7.3) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. |
+| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string}` → 200 `UnlockResponse` (§7.3) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event is written at most once per (share, client) per 10 min. |
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
-| GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. |
-| GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers) |
+| GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
+| GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers). At most 500 sockets per share and 5000 in total; beyond that the socket is closed with 1013. |
 | GET/HEAD | `/ws/:token/*` | p2p | webseed: `/<torrent_name>/<file path>` (or `/<torrent_name>` for single-file). Range support, throttled by the shared upload limiter, CORS `*` for GET/HEAD only, no cookies. |
 | GET (WS) | `/api/s/:shareId/live` | p2p | swarm stats socket (§8) |
 

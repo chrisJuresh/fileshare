@@ -11,12 +11,12 @@ import type { AppContext } from '../context.js';
 import { CAP_KEYS, effectiveCapBps } from '../core/upload-cap.js';
 import type { ShareDto, SwarmSnapshot } from '../types.js';
 import { Limiter } from './limiter.js';
-import { DEFAULT_UNLOCK_LIMITS, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
+import { DEFAULT_UNLOCK_LIMITS, RecentOnce, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
 import { registerShareApi } from './routes.js';
 import { internalAnnounceHost, Seeder } from './seeder.js';
 import { P2PError, shareState, ShareStore, type ArgonOptions } from './shares.js';
 import { SwarmStats, type SwarmTimings } from './swarm.js';
-import { scrub, TrackerService } from './tracker.js';
+import { scrub, TrackerService, type TrackerOptions } from './tracker.js';
 import { registerWebseed, type WebseedControl } from './webseed.js';
 
 export { P2PError } from './shares.js';
@@ -57,7 +57,12 @@ export interface P2POptions {
   live?: Partial<SwarmTimings>;
   /** Webseed: drop responses whose socket made no progress for this long (default 60 s). */
   webseedIdleMs?: number;
+  /** Tracker abuse limits (tests); defaults in tracker.ts. */
+  trackerLimits?: Pick<TrackerOptions, 'announceLimit' | 'maxWsPerShare' | 'maxWsTotal'>;
 }
+
+/** At most one `unlocked` share event per (share, client IP) in this window. */
+export const UNLOCK_EVENT_TTL_MS = 10 * 60_000;
 
 export class P2P implements P2PService {
   readonly limiter = new Limiter();
@@ -65,6 +70,7 @@ export class P2P implements P2PService {
   readonly tracker: TrackerService;
   readonly stats: SwarmStats;
   readonly unlockLimiter: UnlockRateLimiter;
+  readonly unlockEvents = new RecentOnce(UNLOCK_EVENT_TTL_MS);
   seeder: Seeder | undefined;
 
   private readonly internalSecret = randomBytes(18).toString('base64url');
@@ -90,6 +96,7 @@ export class P2P implements P2PService {
       onAnnounce: (a) => this.stats.onAnnounce(a),
       announceIp: ctx.config.env.WEBRTC_ANNOUNCE_IP.trim(),
       webrtcPort: ctx.config.env.WEBRTC_PORT,
+      ...opts.trackerLimits,
     });
     this.stats = new SwarmStats(ctx, {
       shares: this.shares,
@@ -102,7 +109,7 @@ export class P2P implements P2PService {
 
   async registerPublicRoutes(app: FastifyInstance): Promise<void> {
     this.app = app;
-    await registerShareApi(app, this.ctx, { shares: this.shares, unlockLimiter: this.unlockLimiter });
+    await registerShareApi(app, this.ctx, { shares: this.shares, unlockLimiter: this.unlockLimiter, unlockEvents: this.unlockEvents });
     await this.tracker.register(app);
     this.webseed = await registerWebseed(app, this.ctx, {
       shares: this.shares,
@@ -165,7 +172,11 @@ export class P2P implements P2PService {
     every(this.opts.sweepIntervalMs ?? 30_000, () => this.sweep());
     every(this.opts.flushIntervalMs ?? 10_000, () => this.stats.flush());
     every(this.opts.tickIntervalMs ?? 1_500, () => this.stats.tick(this.seeder?.shareIds() ?? []));
-    every(60_000, () => this.unlockLimiter.prune());
+    every(60_000, () => {
+      this.unlockLimiter.prune();
+      this.unlockEvents.prune();
+      this.tracker.announceLimiter.prune();
+    });
   }
 
   async stop(): Promise<void> {
