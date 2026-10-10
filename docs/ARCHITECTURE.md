@@ -662,7 +662,9 @@ registerAdminApi(app: FastifyInstance, ctx: AppContext, deps: { ingest: IngestSe
 
 * **Unit:** `vitest`, `*.test.ts` next to the code, with temp dirs and in-memory or temp SQLite.
 * **Integration:** `test/integration/*.test.ts`. The real app runs in-process on ephemeral ports,
-  with a fake Syncthing REST server and a local JWKS for Access.
+  with a fake Syncthing REST server and a local JWKS for Access. `full-stack.test.ts` wires the real
+  admin listener + ingest + p2p + public listener together (tus upload → ready → share → unlock →
+  webseed → revoke → delete); only Syncthing, the restic runner and the Access key server are fakes.
 * **E2E:** Playwright (`test/e2e/`). The app runs via `scripts/test-stack.sh` on non-default ports.
   It covers 6 Chromium peers, Firefox fallback, enforcement and the upload cap.
 * **Test data is always synthetic:** random bytes from `scripts/gen-testdata.sh`.
