@@ -97,7 +97,8 @@ test('@big 6 Chromium peers, one big share, capped server', async () => {
       if (errs.length) throw new Error(`peer error: ${errs.map((x) => x.error).join('; ')}`);
       if (states.every((x) => x.saved)) break;
       const sum = states.reduce((a, x) => a + x.progress + (x.saved ? 1 : 0), 0);
-      if (sum > swarmProgress.sum + 0.001) swarmProgress = { sum, at: Date.now() };
+      // Once every byte is downloaded only the disk-bound saving remains (not visible in the hook).
+      if (sum > swarmProgress.sum + 0.001 || states.every((x) => x.progress === 1)) swarmProgress = { sum, at: Date.now() };
       else if (Date.now() - swarmProgress.at > stallMs) {
         throw new Error(
           `no progress for ${stallMs / 60_000} min after ${((Date.now() - t0) / 1000).toFixed(0)} s: ` +
