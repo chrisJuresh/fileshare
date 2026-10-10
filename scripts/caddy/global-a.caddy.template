@@ -1,0 +1,7 @@
+	# >>> fileshare global (scripts/caddy/apply.sh; remove with scripts/caddy/revert.sh) >>>
+	# HTTP/1.1 + HTTP/2 only on the fileshare listener: no QUIC socket, no Alt-Svc.
+	# Must name the exact listener address (`bind` IP + port); a bare `:8443` does not match.
+	servers ${LAN_IP}:8443 {
+		protocols h1 h2
+	}
+	# <<< fileshare global <<<

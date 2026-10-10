@@ -1,0 +1,30 @@
+# >>> fileshare site (scripts/caddy/apply.sh; remove with scripts/caddy/revert.sh) >>>
+# Variant A: HTTP/3 is switched off for the ${LAN_IP}:8443 listener in the global options block
+# (see global-a.caddy.template), so no Alt-Svc handling is needed here.
+# Public share site. The router forwards external 443 -> ${LAN_IP}:8443; nothing else reaches it.
+${PUBLIC_HOST}:8443 {
+	bind ${LAN_IP}
+
+	tls {
+		issuer acme {
+			# Port 80 is not forwarded: TLS-ALPN-01 only, answered on this listener.
+			disable_http_challenge
+			alt_tlsalpn_port 8443
+		}
+	}
+
+	header -Server
+	header Strict-Transport-Security "max-age=31536000"
+
+	# No uploads on the public site.
+	request_body {
+		max_size 64KB
+	}
+
+	# No access log on purpose: share URLs carry tokens.
+	reverse_proxy ${PUBLIC_BIND}:${PUBLIC_PORT} {
+		flush_interval -1
+		stream_close_delay 5m
+	}
+}
+# <<< fileshare site <<<
