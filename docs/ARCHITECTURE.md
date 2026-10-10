@@ -102,6 +102,7 @@ docs/
 /data/library/<name>     library items (a file or a directory); <name> is unique
 /data/staging/<batch>/   finished web uploads, grouped by upload batch
 /data/uploads/           tus in-progress uploads (+ .json metadata)
+/data/.ingest-trash/     outbox entries quarantined during verified removal (ingest; normally empty)
 ```
 
 `/state/seedlinks/<shareId>/<torrentName>` is a symlink to `/data/library/<item name>`. The seeder
@@ -275,6 +276,8 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
   1. Re-walk the outbox entry and verify that every file is the **same inode** as its library
      counterpart, with no extra and no missing files.
   2. Only then remove the outbox entry (`rm -r`). Syncthing propagates the delete to the PC.
+     (Implementation: the entry is first renamed to `/data/.ingest-trash/<itemId>`, verified again
+     there, and only then deleted; on a late mismatch it is renamed back.)
   3. If verification fails, do **not** delete. Set `error` to "outbox copy changed after ingest;
      not removed". The library copy stays (status `error`, retry re-verifies).
 * **ready**: shareable.
