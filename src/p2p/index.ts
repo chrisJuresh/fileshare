@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Transform } from 'node:stream';
 import type { AppContext } from '../context.js';
-import { getSetting } from '../db/index.js';
+import { CAP_KEYS, effectiveCapBps } from '../core/upload-cap.js';
 import type { ShareDto, SwarmSnapshot } from '../types.js';
 import { Limiter } from './limiter.js';
 import { DEFAULT_UNLOCK_LIMITS, UnlockRateLimiter, type UnlockLimits } from './ratelimit.js';
@@ -58,8 +58,6 @@ export interface P2POptions {
   /** Webseed: drop responses whose socket made no progress for this long (default 60 s). */
   webseedIdleMs?: number;
 }
-
-export const CAP_SETTING = 'upload.cap_bps';
 
 export class P2P implements P2PService {
   readonly limiter = new Limiter();
@@ -120,9 +118,10 @@ export class P2P implements P2PService {
     });
   }
 
+  /** Same effective cap the dashboard shows (core/upload-cap.ts); 0 = none configured = unlimited. */
   private applyCap(): void {
-    const v = getSetting<unknown>(this.ctx.db, CAP_SETTING);
-    this.limiter.setRate(typeof v === 'number' ? v : Number.POSITIVE_INFINITY);
+    const cap = effectiveCapBps(this.ctx.db);
+    this.limiter.setRate(cap > 0 ? cap : Number.POSITIVE_INFINITY);
     this.log.info({ capBps: this.limiter.rate() }, 'upload cap applied');
   }
 
@@ -132,7 +131,7 @@ export class P2P implements P2PService {
     this.applyCap();
     this.unsubs.push(
       this.ctx.events.on('settings.changed', ({ key }) => {
-        if (key === CAP_SETTING) this.applyCap();
+        if (CAP_KEYS.includes(key)) this.applyCap();
       }),
       this.ctx.events.on('share.changed', ({ shareId }) => void this.reconcile(shareId)),
     );

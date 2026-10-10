@@ -526,7 +526,9 @@ There is one process-wide token bucket (`p2p/limiter.ts`) for **all** server upl
 - seeder (TCP, uTP, WebRTC)
 
 The seeder uses WebTorrent's upload throttle group. The webseed pipes through a throttle from the
-**same** group. The rate is `settings.upload.cap_bps`, applied live on `settings.changed`.
+**same** group. The rate is the **effective cap** from `core/upload-cap.ts` (the one definition,
+also used by the dashboard/stats/live): `upload.cap_bps` if set, else `floor(0.9 × upload.capacity_bps)`
+if a capacity is known, else unlimited. It is re-applied live on `settings.changed` for either key.
 `currentBps()` is a 2 s moving average used by stats.
 
 ## 11. P2P settings (verified against webtorrent 3.0.21)
