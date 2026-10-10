@@ -1,3 +1,6 @@
 import { render } from 'preact';
+import { App } from './App.tsx';
+import './app.css';
 
-render(<p>placeholder</p>, document.getElementById('app')!);
+const root = document.getElementById('app');
+if (root) render(<App />, root);

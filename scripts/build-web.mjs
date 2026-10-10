@@ -41,3 +41,12 @@ mkdirSync(vendor, { recursive: true });
 const wt = path.join(root, 'node_modules', 'webtorrent', 'dist');
 cpSync(path.join(wt, 'webtorrent.min.js'), path.join(vendor, 'webtorrent.min.js'));
 cpSync(path.join(wt, 'sw.min.js'), path.join(vendor, 'sw.min.js'));
+
+// Recipient "Download all" zip service worker (classic script). Served as /vendor/fs-zip-sw.js and
+// registered with scope /vendor/fszip/, so it needs no Service-Worker-Allowed header.
+await build({
+  ...common,
+  format: 'iife',
+  entryPoints: [path.join(root, 'web', 'recipient', 'zip-sw.ts')],
+  outfile: path.join(vendor, 'fs-zip-sw.js'),
+});
