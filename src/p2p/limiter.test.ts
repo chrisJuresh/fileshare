@@ -87,6 +87,33 @@ describe('Limiter', () => {
     expect(t.destroyed).toBe(true);
   });
 
+  it('a webseed throttle is not starved by busy seeder wires (FIFO bucket)', async () => {
+    // Seeder wires draw from the same group through speed-limiter Throttles in 16 KiB blocks; the
+    // webseed throttle asks for 64 KiB. With a first-come bucket the wires grab every drip and the
+    // webseed never gets 64 KiB together (regression: 0 bytes while the seeder was busy).
+    const l = new Limiter();
+    const rate = 1024 * 1024;
+    l.setRate(rate);
+    let wireBytes = 0;
+    const wires = [0, 1].map(() => {
+      const w = l.group.throttle() as unknown as { write(b: Buffer): boolean; on(e: string, f: (b: Buffer) => void): void; destroy(): void };
+      w.on('data', (b: Buffer) => (wireBytes += b.length));
+      for (let i = 0; i < 256; i++) w.write(randomBytes(16 * 1024)); // 4 MiB backlog each
+      return w;
+    });
+    let webseedBytes = 0;
+    const t = l.throttle();
+    t.on('data', (b: Buffer) => (webseedBytes += b.length));
+    for (let i = 0; i < 64; i++) t.write(randomBytes(64 * 1024));
+    await new Promise((r) => setTimeout(r, 3000));
+    for (const w of wires) w.destroy();
+    t.destroy();
+    const total = wireBytes + webseedBytes;
+    expect(total).toBeLessThanOrEqual(rate * 3 * 1.1 + 64 * 1024);
+    expect(webseedBytes).toBeGreaterThan(total * 0.15);
+    expect(wireBytes).toBeGreaterThan(total * 0.15);
+  });
+
   it('currentBps reflects recorded bytes', () => {
     const l = new Limiter();
     l.record(4000);

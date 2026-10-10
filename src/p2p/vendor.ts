@@ -22,6 +22,8 @@ export interface TokenBucket {
   tokensPerInterval: number;
   content: number;
   tryRemoveTokens(count: number): boolean;
+  /** Calls back (async) once `count` tokens were removed; speed-limiter's Throttle waits on this. */
+  removeTokens(count: number, cb: (err: unknown, remaining?: number) => void): boolean;
   drip(): void;
 }
 

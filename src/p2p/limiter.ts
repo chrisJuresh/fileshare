@@ -6,9 +6,13 @@
 // `throttle()`, a Node Transform that draws tokens from the *same* group bucket (speed-limiter's own
 // Throttle is a streamx stream, which Fastify cannot send directly), honouring the group's
 // enabled flag, rate and chunk size.
+//
+// The group's bucket is replaced by a FIFO bucket (`FairBucket`). The stock `limiter` bucket serves
+// whoever polls first after a drip, so seeder wires asking for 16 KiB blocks every few ms starved
+// webseed responses (64 KiB) completely while the seeder was busy at the cap.
 import { Transform, type TransformCallback } from 'node:stream';
 import type { UploadLimiter } from './index.js';
-import { ThrottleGroupCtor, type ThrottleGroup } from './vendor.js';
+import { ThrottleGroupCtor, type ThrottleGroup, type TokenBucket } from './vendor.js';
 
 /** Sliding-window byte counter: `rate()` = bytes in the last `windowMs` / window seconds. */
 export class RateMeter {
@@ -48,6 +52,107 @@ export class RateMeter {
   }
 }
 
+type BucketCb = (err: unknown, remaining?: number) => void;
+
+/**
+ * Drop-in for `limiter`'s TokenBucket (the interface speed-limiter's ThrottleGroup uses: bucketSize ==
+ * tokensPerInterval == rate per second, content, drip, tryRemoveTokens, removeTokens) that serves
+ * waiters strictly first-in, first-out: `tryRemoveTokens` fails while anyone is queued, and queued
+ * `removeTokens` calls are granted in order as tokens drip in. A request larger than the bucket
+ * (possible right after the rate was lowered) is granted once the bucket is full instead of failing.
+ */
+export class FairBucket implements TokenBucket {
+  bucketSize: number;
+  tokensPerInterval: number;
+  readonly interval = 1000;
+  content = 0;
+  private lastDrip = Date.now();
+  private readonly queue: { count: number; cb: BucketCb }[] = [];
+  private timer: NodeJS.Timeout | undefined;
+
+  constructor(rate: number) {
+    this.bucketSize = rate;
+    this.tokensPerInterval = rate;
+  }
+
+  drip(): void {
+    if (!this.tokensPerInterval) {
+      this.content = this.bucketSize;
+      return;
+    }
+    const now = Date.now();
+    const dt = Math.max(now - this.lastDrip, 0);
+    this.lastDrip = now;
+    this.content = Math.min(this.content + (dt * this.tokensPerInterval) / this.interval, this.bucketSize);
+  }
+
+  tryRemoveTokens(count: number): boolean {
+    if (!this.bucketSize) return true;
+    if (count > this.bucketSize || this.queue.length > 0) return false;
+    this.drip();
+    if (count > this.content) return false;
+    this.content -= count;
+    return true;
+  }
+
+  removeTokens(count: number, cb: BucketCb): boolean {
+    if (!this.bucketSize) {
+      process.nextTick(cb, null, Number.POSITIVE_INFINITY);
+      return true;
+    }
+    if (this.queue.length === 0) {
+      this.drip();
+      const need = Math.min(count, this.bucketSize);
+      if (need <= this.content) {
+        this.content -= need;
+        process.nextTick(cb, null, this.content);
+        return true;
+      }
+    }
+    this.queue.push({ count, cb });
+    this.schedule();
+    return false;
+  }
+
+  /** Withdraw a queued request (its tokens are not taken). */
+  cancel(cb: BucketCb): void {
+    const i = this.queue.findIndex((w) => w.cb === cb);
+    if (i >= 0) this.queue.splice(i, 1);
+    if (this.queue.length === 0 && this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  get waiting(): number {
+    return this.queue.length;
+  }
+
+  private schedule(): void {
+    if (this.timer || this.queue.length === 0) return;
+    this.drip();
+    const need = Math.min(this.queue[0]!.count, this.bucketSize || Number.POSITIVE_INFINITY);
+    const ms = this.tokensPerInterval > 0 ? Math.ceil(((need - this.content) * this.interval) / this.tokensPerInterval) : MAX_POLL_MS;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.serve();
+    }, Math.max(1, Math.min(ms, MAX_POLL_MS)));
+  }
+
+  private serve(): void {
+    this.drip();
+    while (this.queue.length > 0) {
+      const head = this.queue[0]!;
+      const need = this.bucketSize ? Math.min(head.count, this.bucketSize) : 0;
+      if (need > this.content) break;
+      this.content -= need;
+      this.queue.shift();
+      head.cb(null, this.content);
+    }
+    this.schedule();
+  }
+}
+
 const MAX_POLL_MS = 250;
 
 /** Node Transform that draws tokens from a ThrottleGroup's bucket. Destroy-safe (no leaked waits). */
@@ -81,23 +186,36 @@ class GroupThrottle extends Transform {
     }
   }
 
-  /** Waits until up to `want` tokens are available and removes them. Returns the count taken. */
+  /**
+   * Waits (in the bucket's FIFO queue, alongside the seeder's wires) until up to `want` tokens are
+   * granted. Returns the count taken (all of `want` when the cap is lifted meanwhile).
+   */
   private async acquireTokens(want: number): Promise<number> {
-    for (;;) {
-      if (this.dead || !this.group.getEnabled()) return want;
-      const bucket = this.group.bucket;
-      const rate = this.group.getRate();
-      const n = Math.max(1, Math.min(want, this.group.getChunksize(), bucket.bucketSize || want));
-      if (rate > 0 && bucket.tryRemoveTokens(n)) return n;
-      const deficit = Math.max(1, n - bucket.content);
-      const waitMs = rate > 0 ? Math.min(MAX_POLL_MS, Math.max(5, Math.ceil((deficit * 1000) / rate))) : MAX_POLL_MS;
+    if (this.dead || !this.group.getEnabled()) return want;
+    const bucket = this.group.bucket as FairBucket;
+    const n = Math.max(1, Math.min(want, this.group.getChunksize(), bucket.bucketSize || want));
+    if (bucket.tryRemoveTokens(n)) return n;
+    let granted = false;
+    const cb: BucketCb = () => {
+      granted = true;
+      this.wake?.();
+    };
+    bucket.removeTokens(n, cb);
+    while (!granted && !this.dead) {
       await new Promise<void>((resolve) => {
         this.wake = resolve;
-        this.timer = setTimeout(resolve, waitMs);
+        this.timer = setTimeout(resolve, MAX_POLL_MS);
       });
+      if (this.timer) clearTimeout(this.timer);
       this.timer = undefined;
       this.wake = undefined;
+      if (!granted && !this.group.getEnabled()) {
+        bucket.cancel(cb);
+        return want;
+      }
     }
+    if (!granted) bucket.cancel(cb);
+    return n;
   }
 
   override _destroy(err: Error | null, cb: (error?: Error | null) => void): void {
@@ -116,6 +234,8 @@ export class Limiter implements UploadLimiter {
 
   constructor(now: () => number = Date.now) {
     this.meter = new RateMeter(2000, 100, now);
+    // FIFO instead of first-come (see the header). setRate() keeps writing bucketSize/tokensPerInterval.
+    this.group.bucket = new FairBucket(this.group.bucket.tokensPerInterval);
   }
 
   /** bytes/s; a non-finite or < 1 value means "unlimited". */
