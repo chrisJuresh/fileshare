@@ -321,5 +321,29 @@ export async function startHashSink(): Promise<HashSink> {
   throw new Error('no free port for the hash sink');
 }
 
+export interface RateSample {
+  at: number;
+  /** The app's 2 s moving average (`/api/admin/stats` upload.currentBps). */
+  bps: number;
+  /** Server bytes (p2p + webseed) of the share under test so far. */
+  serverBytes: number;
+}
+
+/**
+ * The upload limiter is a token bucket holding 1 s worth of tokens, so over any window of T seconds the
+ * server may send at most cap × (T + 1). Returns the worst ratio (bytes sent / that envelope) over all
+ * windows of ≥ 2 samples; ≤ 1 (+ sampling jitter) means the cap held.
+ */
+export function worstCapEnvelope(samples: RateSample[], cap: number): number {
+  let worst = 0;
+  for (let i = 0; i < samples.length; i++) {
+    for (let j = i + 2; j < samples.length; j++) {
+      const T = (samples[j]!.at - samples[i]!.at) / 1000;
+      worst = Math.max(worst, (samples[j]!.serverBytes - samples[i]!.serverBytes) / (cap * (T + 1)));
+    }
+  }
+  return worst;
+}
+
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 export const fmtMB = (n: number): string => `${(n / 1e6).toFixed(1)} MB`;

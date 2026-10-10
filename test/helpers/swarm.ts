@@ -45,6 +45,8 @@ export interface PeerOptions {
   bypassCSP?: boolean;
   /** Extra Chromium args. */
   args?: string[];
+  /** Diagnostics: keep the page's WebTorrent clients in `globalThis.__wt` (see wtDiag). */
+  spy?: boolean;
 }
 
 export async function launchPeer(index: number, profileRoot: string, o: PeerOptions = {}): Promise<BrowserPeer> {
@@ -64,6 +66,17 @@ export async function launchPeer(index: number, profileRoot: string, o: PeerOpti
     },
     { dir: OUT_DIR, webseedAfterMs: o.webseedAfterMs },
   );
+  if (o.spy) {
+    // Serve the same bundle with its default export wrapped so client instances are reachable.
+    await context.route('**/vendor/webtorrent.min.js', async (route) => {
+      const res = await route.fetch();
+      const body = (await res.text()).replace(
+        'export{i as default};',
+        'const __W=class extends i{constructor(...a){super(...a);(globalThis.__wt||=[]).push(this)}};export{__W as default};',
+      );
+      await route.fulfill({ response: res, body });
+    });
+  }
   const page = context.pages()[0] ?? (await context.newPage());
   const peer: BrowserPeer = { index, context, page, profile, liveFrames: [], apiBodies: [], pageErrors: [] };
   page.on('websocket', (ws) => {
@@ -100,6 +113,38 @@ export async function startDownload(peer: BrowserPeer, shareUrl: string, passwor
 
 export async function hookState(page: Page): Promise<HookState> {
   return page.evaluate(() => (window as unknown as { __fileshareTest: { state: () => HookState } }).__fileshareTest.state());
+}
+
+/** Diagnostics for a page launched with `spy`: piece/wire state of its torrent. */
+export async function wtDiag(page: Page): Promise<unknown> {
+  return page.evaluate(() => {
+    const c = (globalThis as unknown as { __wt?: any[] }).__wt?.at(-1);
+    const t = c?.torrents?.[0];
+    if (!t) return null;
+    const n = t.pieces.length;
+    const missing: number[] = [];
+    for (let i = 0; i < n; i++) if (!t.bitfield.get(i)) missing.push(i);
+    return {
+      progress: t.progress,
+      pieces: n,
+      missing: missing.length,
+      firstMissing: missing.slice(0, 8),
+      reserved: missing.slice(0, 8).map((i: number) => (t._reservations?.[i] ?? []).filter(Boolean).length),
+      selections: t._selections?.length,
+      wires: t.wires.map((w: any) => ({
+        type: w.type,
+        peerChoking: w.peerChoking,
+        amChoking: w.amChoking,
+        amInterested: w.amInterested,
+        peerInterested: w.peerInterested,
+        requests: w.requests.length,
+        peerRequests: w.peerRequests.length,
+        hasMissing: missing.filter((i) => w.peerPieces.get(i)).length,
+        down: Math.round(w.downloadSpeed()),
+        up: Math.round(w.uploadSpeed()),
+      })),
+    };
+  });
 }
 
 /** sha256 of every file under OPFS:/fileshare-e2e via WebCrypto (fine for small files only). */

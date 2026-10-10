@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { ShareDto, StatsDto } from '../../src/types.ts';
-import { admin, createShare, findIps, fmtMB, pub, SCRATCH, seedItem, setCap, sha256File, sleep, stack, stripConfigured } from '../helpers/stack.ts';
+import { admin, createShare, findIps, fmtMB, pub, SCRATCH, seedItem, setCap, sha256File, sleep, stack, stripConfigured, worstCapEnvelope, type RateSample } from '../helpers/stack.ts';
 import {
   closePeers,
   hookState,
@@ -42,12 +42,13 @@ test('3 browsers and a torrent client share one capped swarm; live tables; no IP
   const profiles = path.join(SCRATCH, 'profiles', `swarm-${tag}`);
   const peers: BrowserPeer[] = [];
   let tc: TorrentClient | undefined;
-  const samples: number[] = [];
+  const samples: RateSample[] = [];
   let sampling = true;
   const sampler = (async () => {
     while (sampling) {
-      const r = await admin<StatsDto>('GET', '/api/admin/stats');
-      samples.push(r.body.upload.currentBps);
+      const [r, sh] = await Promise.all([admin<StatsDto>('GET', '/api/admin/stats'), admin<ShareDto[]>('GET', '/api/admin/shares')]);
+      const st = (sh.body as ShareDto[]).find((d) => d.id === share.id)!.stats;
+      samples.push({ at: Date.now(), bps: r.body.upload.currentBps, serverBytes: st.serverBytesP2p + st.serverBytesWebseed });
       await sleep(1000);
     }
   })();
@@ -81,7 +82,11 @@ test('3 browsers and a torrent client share one capped swarm; live tables; no IP
     for (const f of item.files) expect(await sha256File(path.join(tc.dir, item.name, f.path))).toBe(f.sha256);
 
     const states = await Promise.all(peers.map((p) => hookState(p.page)));
-    for (const st of states) expect(st.error).toBeNull();
+    for (const st of states) {
+      expect(st.error).toBeNull();
+      // big.bin (40 MiB) ends exactly on a piece boundary: the page must still reach 100 %.
+      expect(st.progress).toBe(1);
+    }
     const peerUploaded = states.reduce((a, st) => a + st.uploaded, 0);
     const webseedBytes = states.reduce((a, st) => a + st.webseedBytes, 0);
     await sleep(2500); // last stats messages
@@ -93,12 +98,13 @@ test('3 browsers and a torrent client share one capped swarm; live tables; no IP
       `[swarm] ${peers.length} browsers + 1 client, ${fmtMB(item.totalBytes)} each, ${(duration / 1000).toFixed(1)} s; ` +
         `server ${fmtMB(serverBytes)} (p2p ${fmtMB(st.serverBytesP2p)}, webseed ${fmtMB(st.serverBytesWebseed)}), ` +
         `browsers uploaded ${fmtMB(peerUploaded)} (share_stats peer_bytes ${fmtMB(st.peerBytes)}), browser webseed ${fmtMB(webseedBytes)}, ` +
-        `delivered ${fmtMB(delivered)}, saved ${((1 - serverBytes / delivered) * 100).toFixed(1)} %, max 2 s server rate ${fmtMB(Math.max(...samples))}/s`,
+        `delivered ${fmtMB(delivered)}, saved ${((1 - serverBytes / delivered) * 100).toFixed(1)} %, max 2 s server rate ${fmtMB(Math.max(...samples.map((x) => x.bps)))}/s, cap envelope ${(worstCapEnvelope(samples, CAP) * 100).toFixed(0)} %`,
     );
     expect(peerUploaded).toBeGreaterThan(item.totalBytes / 2);
     expect(serverBytes).toBeLessThan(delivered);
     expect(st.completedDownloads).toBeGreaterThanOrEqual(peers.length);
-    expect(Math.max(...samples)).toBeLessThanOrEqual(CAP * 1.15);
+    expect(worstCapEnvelope(samples, CAP)).toBeLessThanOrEqual(1.05);
+    expect(Math.max(...samples.map((x) => x.bps))).toBeLessThanOrEqual(CAP * 1.5);
 
     // Live tables: recipients see the server row + every browser (with progress) + the client.
     const all = peers.flatMap((p) => swarmMessages(p));
