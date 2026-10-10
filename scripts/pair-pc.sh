@@ -11,14 +11,15 @@
 #   2. adds/updates device "pc" (addresses: dynamic [+ tcp://<pc-lan-ip>:22000])
 #   3. creates/updates folder ${SYNCTHING_FOLDER_ID} at /data/outbox (Send & Receive, no
 #      versioning, fs watcher on) shared with the PC, and writes its .stignore patterns
-#   4. sets SYNCTHING_PC_DEVICE_ID in .env (backup first) and recreates the app container
+#   4. sets SYNCTHING_PC_DEVICE_ID in .env (in place; backup in ${APPDATA}/host-backups/) and
+#      recreates the app and restic containers (no image build)
 # The API key is read from ${APPDATA}/secrets/syncthing-api-key and never printed.
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 usage() {
-  sed -n '2,15p' "$0"
+  sed -n '2,16p' "$0"
   exit "${1:-0}"
 }
 
@@ -203,8 +204,15 @@ elif $dry; then
 else
   env_set SYNCTHING_PC_DEVICE_ID "$PC_ID"
   if $restart && [[ -n $(docker compose -f "$REPO_DIR/compose.yaml" ps -q app 2>/dev/null) ]]; then
-    docker compose -f "$REPO_DIR/compose.yaml" up -d --no-deps app
-    info "app recreated with the new device ID"
+    # Both services read .env (env_file); --no-build: pairing must never rebuild the image.
+    # Compose progress output goes to a log so the script stays readable over ssh.
+    info "recreating app and restic (a running backup is interrupted and retried later)"
+    if ! docker compose -f "$REPO_DIR/compose.yaml" up -d --no-deps --no-build --quiet-pull app restic \
+      >"$work/compose.log" 2>&1; then
+      cat "$work/compose.log" >&2
+      die "docker compose up failed; the new ID is in $ENV_FILE, retry: docker compose up -d --no-deps --no-build app restic"
+    fi
+    info "app and restic recreated with the new device ID"
   else
     info "app not restarted (not running or --no-restart); it picks the ID up on next start"
   fi

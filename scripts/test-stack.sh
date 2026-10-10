@@ -234,7 +234,8 @@ start_fake_syncthing() {
   PC_DEVICE_ID=FAKEPCD-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG
 }
 
-env_set_quiet() { ENV_FILE="$APP_ENV" env_set "$1" "$2" >/dev/null; }
+# Backups of stack.env go to $STACK_DIR/host-backups, never to the real ${APPDATA}.
+env_set_quiet() { APPDATA="$STACK_DIR" ENV_FILE="$APP_ENV" env_set "$1" "$2" >/dev/null; }
 
 write_stack_json() {
   python3 - "$STACK_DIR/stack.json" <<EOF
@@ -284,7 +285,7 @@ cmd_start() {
 
   mkdir -p "$SCRATCH"
   (umask 027 && mkdir -p "$STACK_DIR"/{data/outbox,data/library,data/staging,data/uploads,state,restic-repo,syncthing-server,syncthing-pc,pc-folder,tmp} "$RUN" "$LOGS")
-  (umask 077 && mkdir -p "$STACK_DIR/secrets")
+  (umask 077 && mkdir -p "$STACK_DIR/secrets" "$STACK_DIR/host-backups")
   chmod 700 "$STACK_DIR/secrets"
   for s in share-hmac-key syncthing-api-key syncthing-pc-api-key syncthing-gui-password restic-password; do secret_file "$s"; done
   write_app_env

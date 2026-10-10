@@ -42,6 +42,13 @@ docker compose restart app                 # same config
 docker compose up -d                       # after editing .env or compose.yaml (recreates changed services)
 ```
 
+`restic` bind-mounts `.env` as a single file (`/config/.env`, backed up as app config). A single-file
+bind mount follows the inode, so a tool that replaces `.env` with a new file leaves running
+containers on the old content until they are recreated. The scripts (`env_set` in
+`scripts/lib.sh`, used by `pair-pc.sh`) therefore rewrite `.env` in place, keep it at mode 600 and
+put the previous version in `${APPDATA}/host-backups/<timestamp>/env.bak`. After a hand edit,
+`docker compose up -d` recreates `app` and `restic` anyway (their `env_file` changed).
+
 The restic runner handles SIGTERM: a running restic job is interrupted cleanly (recorded as
 `interrupted`) and its requests are retried later. `stop_grace_period` is 2 minutes.
 

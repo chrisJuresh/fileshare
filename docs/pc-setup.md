@@ -85,7 +85,10 @@ ssh <server> "cd <repo dir> && ./scripts/pair-pc.sh $pcId $pcIp"
 ```
 
 The script adds this PC as device `pc`, shares folder `fileshare-outbox` with it, writes the
-server's `.stignore`, records the PC's ID in the server's `.env` and restarts the app. It prints:
+server's `.stignore`, records the PC's ID in the server's `.env` (edited in place; the previous
+version is kept in `${APPDATA}/host-backups/<timestamp>/env.bak`) and recreates the `app` and
+`restic` containers without rebuilding the image (a backup that happens to be running is
+interrupted and retried). It prints:
 
 - **Server device ID**: copy it into `$serverId` below
 - **Folder ID**: `fileshare-outbox` (default)

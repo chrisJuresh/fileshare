@@ -35,15 +35,27 @@ env_get() {
   printf '%s' "$default"
 }
 
-# env_set KEY VALUE — set KEY in $ENV_FILE in place (after a timestamped backup next to it).
-# VALUE must not contain newlines.
+# env_set KEY VALUE — set KEY in $ENV_FILE. VALUE must not contain newlines.
+# The file is rewritten IN PLACE (same inode): the restic container bind-mounts it as a single
+# file, and a replaced file (new inode) would leave the container reading the old content.
+# A copy of the previous content goes to ${APPDATA}/host-backups/<timestamp>/env.bak (mode 600),
+# never next to the file in the repository.
 env_set() {
-  local key=$1 value=$2 tmp backup
+  local key=$1 value=$2 tmp backup_dir backup n=1
   [[ -f $ENV_FILE ]] || die "$ENV_FILE not found"
   [[ $value != *$'\n'* ]] || die "refusing multi-line value for $key"
-  backup="$ENV_FILE.bak.$(date +%Y%m%d-%H%M%S)"
-  cp -p "$ENV_FILE" "$backup"
-  tmp=$(mktemp "$ENV_FILE.XXXXXX")
+  backup_dir="$(env_get APPDATA /srv/appdata/fileshare)/host-backups"
+  [[ -d $backup_dir ]] || die "$backup_dir not found (run scripts/init-dirs.sh)"
+  backup_dir="$backup_dir/$(timestamp)"
+  (umask 077 && mkdir -p "$backup_dir")
+  backup="$backup_dir/env.bak"
+  while [[ -e $backup ]]; do
+    backup="$backup_dir/env.bak.$n"
+    n=$((n + 1))
+  done
+  (umask 077 && cat "$ENV_FILE" >"$backup")
+  chmod 600 "$backup"
+  tmp=$(mktemp) # mode 600
   if grep -qE "^${key}=" "$ENV_FILE"; then
     KEY="$key" VALUE="$value" awk 'BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"] }
       index($0, k "=") == 1 { print k "=" v; next } { print }' "$ENV_FILE" >"$tmp"
@@ -51,8 +63,13 @@ env_set() {
     cat "$ENV_FILE" >"$tmp"
     printf '%s=%s\n' "$key" "$value" >>"$tmp"
   fi
-  chmod --reference="$ENV_FILE" "$tmp"
-  mv "$tmp" "$ENV_FILE"
+  # Truncate + write keeps the inode; the backup above covers an interrupted write.
+  cat "$tmp" >"$ENV_FILE" || {
+    rm -f "$tmp"
+    die "writing $ENV_FILE failed; previous content is in $backup"
+  }
+  rm -f "$tmp"
+  chmod 600 "$ENV_FILE"
   info "set $key in $ENV_FILE (backup: $backup)"
 }
 
