@@ -519,8 +519,15 @@ There is one process-wide token bucket (`p2p/limiter.ts`) for **all** server upl
 - seeder (TCP, uTP, WebRTC)
 
 The seeder uses WebTorrent's upload throttle group. The webseed pipes through a throttle from the
-**same** group. The rate is `settings.upload.cap_bps`, applied live on `settings.changed`.
-`currentBps()` is a 2 s moving average used by stats.
+**same** group. The rate is the effective cap — `settings.upload.cap_bps`, else
+`floor(0.9 × upload.capacity_bps)`, else unlimited — applied live on `settings.changed` (the CLI's
+writes reach the app through the settings watcher within ~3 s). `currentBps()` is a 2 s moving
+average used by stats.
+
+The group's bucket is a FIFO token bucket (`FairBucket`): waiting requests are granted in arrival
+order, so seeder wires (16 KiB blocks) cannot starve webseed responses (64 KiB). It holds 1 s of
+tokens, so over any window of T seconds the server sends at most `cap × (T + 1)` (a 2 s average can
+briefly read up to 1.5 × cap after an idle period).
 
 ## 11. P2P settings (verified against webtorrent 3.0.21)
 
@@ -532,6 +539,10 @@ The seeder uses WebTorrent's upload throttle group. The webseed pipes through a 
 - `uploads` raised (e.g. 64)
 - `storeCacheSlots` 0–4
 - `secure` per measurement (see notes)
+
+- `p2p/ice.ts` patches simple-peer so the server's WebRTC answers go out when ICE gathering is
+  complete: webrtc-polyfill never sends the null end-of-candidates event simple-peer waits for, so
+  answers otherwise waited for its 5 s fallback timer (time to first byte ~5.2 s → ~0.2 s).
 
 Torrents are added from stored metainfo with `{ path: /state/seedlinks/<shareId>, skipVerify: true }`.
 Only **active** shares are seeded. They are added and removed on `share.changed`, and an expiry
@@ -619,6 +630,13 @@ registerAdminApi(app: FastifyInstance, ctx: AppContext, deps: { ingest: IngestSe
 * **Unit:** `vitest`, `*.test.ts` next to the code, with temp dirs and in-memory or temp SQLite.
 * **Integration:** `test/integration/*.test.ts`. The real app runs in-process on ephemeral ports,
   with a fake Syncthing REST server and a local JWKS for Access.
-* **E2E:** Playwright (`test/e2e/`). The app runs via `scripts/test-stack.sh` on non-default ports.
-  It covers 6 Chromium peers, Firefox fallback, enforcement and the upload cap.
+* **E2E:** Playwright (`test/e2e/`, `playwright.config.ts`). A `stack` setup project starts
+  `scripts/test-stack.sh`: the real app (`node dist/main.js`) on loopback 18xxx ports, the restic
+  runner (app image, production mounts, this checkout's `dist/`), real Syncthing "server" + a stand-in
+  "pc" paired with `scripts/pair-pc.sh` (`compose.test.yaml`, project `fileshare-test`), and a local
+  JWKS standing in for Cloudflare Access. All data lives under `FILESHARE_SCRATCH`
+  (`/srv/fileshare-scratch` by default). Specs: `recipient-*` (page against a mock),
+  `stack-swarm` (3 browsers + a torrent client, live tables, no IPs), `stack-enforce`,
+  `stack-firefox`, `stack-cap`, `stack-ingest` (slow copy through Syncthing, snapshot, RUNBOOK
+  restore) and `stack-big` (`@big`: 6 Chromium peers, 10 GiB; `FILESHARE_BIG=1`).
 * **Test data is always synthetic:** random bytes from `scripts/gen-testdata.sh`.

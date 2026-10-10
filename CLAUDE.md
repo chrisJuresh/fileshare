@@ -25,7 +25,9 @@ npm ci
 npm run typecheck
 npm test                 # vitest unit + integration
 npm run build            # dist/ (server) + dist/web (frontends)
-npm run test:e2e         # Playwright (needs `npx playwright install chromium firefox`)
+npm run test:e2e         # Playwright (needs `npx playwright install chromium firefox`); starts
+                         # scripts/test-stack.sh (Docker for Syncthing + restic, data in FILESHARE_SCRATCH)
+FILESHARE_BIG=1 npx playwright test --grep @big    # the 6-peer 10 GiB run
 docker compose up -d --build
 docker compose exec app node dist/cli.js --help
 ```
