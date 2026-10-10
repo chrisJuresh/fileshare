@@ -1,0 +1,229 @@
+# fileshare stack (docs/ARCHITECTURE.md §1, §2, §6). All settings come from `.env`
+# (copy `.env.example`); secrets are files under ${APPDATA}/secrets (scripts/gen-secrets.sh).
+#
+#   docker compose up -d --build                # app, restic, syncthing
+#   docker compose --profile public up -d       # + ddns (only at public go-live)
+#
+# Host paths must exist before start (scripts/init-dirs.sh); bind mounts never create them,
+# so a typo can't silently produce an empty root-owned directory.
+name: fileshare
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-common: &common
+  restart: unless-stopped
+  logging: *logging
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  labels:
+    com.centurylinklabs.watchtower.enable: "false"
+
+x-app-image: &app-image
+  build:
+    context: .
+  image: fileshare:local
+  pull_policy: build
+
+x-state-env: &state-env
+  NODE_ENV: production
+  DATA_DIR: /data
+  STATE_DIR: /state
+  SECRETS_DIR: /secrets
+
+services:
+  app:
+    <<: [*common, *app-image]
+    init: true
+    user: "${PUID:?set PUID in .env}:${PGID:?set PGID in .env}"
+    # Host networking: the WebRTC peer learns its public address via STUN, and an extra Docker
+    # NAT layer breaks that. Every listener binds an explicit address from .env (§6).
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      <<: *state-env
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - type: bind
+        source: ${DATA_ROOT:?set DATA_ROOT in .env}
+        target: /data
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA:?set APPDATA in .env}/app
+        target: /state
+        bind: { create_host_path: false }
+      # Only the secrets the app needs (not the restic password or the Cloudflare token).
+      - type: bind
+        source: ${APPDATA}/secrets/share-hmac-key
+        target: /secrets/share-hmac-key
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA}/secrets/syncthing-api-key
+        target: /secrets/syncthing-api-key
+        read_only: true
+        bind: { create_host_path: false }
+    mem_limit: 3g
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://'+(process.env.PUBLIC_BIND||'127.0.0.1')+':'+(process.env.PUBLIC_PORT||'8090')+'/healthz',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  restic:
+    <<: [*common, *app-image]
+    init: true
+    command: ["node", "dist/backup/main.js"]
+    user: "${PUID}:${PGID}"
+    # No network at all: the runner talks to the app only through SQLite.
+    network_mode: none
+    # Stable hostname: restic records it in locks and snapshots.
+    hostname: fileshare-restic
+    env_file:
+      - .env
+    environment:
+      <<: *state-env
+      RESTIC_REPOSITORY: /restic
+      RESTIC_PASSWORD_FILE: /secrets/restic-password
+      RESTIC_CACHE_DIR: /state/restic-cache
+      HOME: /tmp
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - type: bind
+        source: ${DATA_ROOT}/library
+        target: /data/library
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA}/app
+        target: /state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA}/secrets
+        target: /secrets
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA}/syncthing
+        target: /syncthing-config
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${RESTIC_REPO_HOST:?set RESTIC_REPO_HOST in .env}
+        target: /restic
+        bind: { create_host_path: false }
+      - type: bind
+        source: ./.env
+        target: /config/.env
+        read_only: true
+        bind: { create_host_path: false }
+    mem_limit: 1g
+    # SIGTERM → the runner SIGINTs restic and records the run as interrupted.
+    stop_grace_period: 2m
+    depends_on:
+      app:
+        # The app applies DB migrations first.
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const s=require('fs').statSync('/tmp/restic-runner.alive');process.exit(Date.now()-s.mtimeMs<120000?0:1)"
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  syncthing:
+    <<: *common
+    image: syncthing/syncthing:2.1.6@sha256:4d0281bdcb4ed9baf503d251d0544ddd856f49fce3f114056257ae172b7fb670
+    user: "${PUID}:${PGID}"
+    hostname: fileshare
+    # The API key comes from the secret file, never from compose/env files. The image's own
+    # entrypoint only matters when started as root; we start as ${PUID} and exec Syncthing directly.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'set -eu; STGUIAPIKEY="$$(cat /run/secrets/syncthing-api-key)"; [ -n "$$STGUIAPIKEY" ]; export STGUIAPIKEY; exec /bin/syncthing'
+    environment:
+      HOME: /var/syncthing/config
+      STHOMEDIR: /var/syncthing/config
+      # GUI/REST must listen on all container interfaces for the loopback-published port below.
+      STGUIADDRESS: 0.0.0.0:8384
+      STNOUPGRADE: "1"
+      TZ: ${TZ:-UTC}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - type: bind
+        source: ${APPDATA}/syncthing
+        target: /var/syncthing/config
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${DATA_ROOT}/outbox
+        target: /data/outbox
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${APPDATA}/secrets/syncthing-api-key
+        target: /run/secrets/syncthing-api-key
+        read_only: true
+        bind: { create_host_path: false }
+    ports:
+      # Sync protocol: LAN address only (not forwarded by the router).
+      - "${LAN_IP:?set LAN_IP in .env}:22000:22000/tcp"
+      - "${LAN_IP}:22000:22000/udp"
+      # GUI/REST: loopback only (the app uses host networking; operators use an SSH tunnel).
+      - "127.0.0.1:8384:8384/tcp"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 4 http://127.0.0.1:8384/rest/noauth/health | grep -q OK"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ddns:
+    <<: *common
+    image: favonia/cloudflare-ddns:1.17.1@sha256:5e61736b982b87d84a1120b4767c4deff0f2cc55ca3ee9dcb1dc58623039b5cb
+    # Not started until the public go-live: docker compose --profile public up -d ddns
+    profiles: ["public"]
+    user: "${PUID}:${PGID}"
+    read_only: true
+    environment:
+      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/cloudflare-api-token
+      DOMAINS: ${DDNS_DOMAINS:?set DDNS_DOMAINS in .env}
+      # DNS-only: TLS-ALPN issuance and BitTorrent/WebRTC need the real address.
+      PROXIED: "false"
+      IP4_PROVIDER: cloudflare.trace
+      IP6_PROVIDER: none
+      UPDATE_CRON: "@every 5m"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - type: bind
+        source: ${APPDATA}/secrets/cloudflare-api-token
+        target: /run/secrets/cloudflare-api-token
+        read_only: true
+        bind: { create_host_path: false }
+    mem_limit: 64m
+    # The image is FROM scratch (no shell, no probe command); failures show in its logs and it
+    # exits non-zero on fatal errors, so `restart: unless-stopped` covers it.
+    healthcheck:
+      disable: true

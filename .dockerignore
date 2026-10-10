@@ -1,0 +1,10 @@
+# Allow-list: only what the Dockerfile COPYs. Keeps .env, secrets and local state out of the context.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.web.json
+!scripts/build-web.mjs
+!src/**
+!web/**
+src/**/*.test.ts
