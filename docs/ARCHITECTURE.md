@@ -407,9 +407,15 @@ unmatched paths are logged as `[unmatched]`. Client IPs are never logged.
 
 Every request except `/healthz` passes `accessJwt` middleware:
 1. Verify `Cf-Access-Jwt-Assertion` with `jose` (RS256) against `https://${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`,
-   `issuer = https://${CF_ACCESS_TEAM_DOMAIN}` and `audience = CF_ACCESS_AUD`.
-2. If `ADMIN_EMAILS` is set, require the `email` claim to be in it.
-3. Otherwise 403. (`CF_ACCESS_CERTS_URL` overrides the certs URL; it exists for tests.)
+   `issuer = https://${CF_ACCESS_TEAM_DOMAIN}` and `audience = CF_ACCESS_AUD`. `CF_ACCESS_TEAM_DOMAIN`
+   must be a bare host name ending in `.cloudflareaccess.com` (otherwise every request is refused and
+   the reason is logged at startup).
+2. A token without an `email` claim (Access service token) is refused unless `ADMIN_EMAILS` lists its
+   client id (`common_name` claim) explicitly.
+3. If `ADMIN_EMAILS` is set, require the `email` claim to be in it. If it is empty, any identity the
+   Access policy admits is allowed, and a warning is logged at startup (outside tests).
+4. Otherwise 403. (`CF_ACCESS_CERTS_URL` overrides the certs URL **only with `NODE_ENV=test`**; in any
+   other mode it is ignored with a startup warning. In tests the team domain may be any host name.)
 
 Mutating requests must also be `Content-Type: application/json` (except tus) and carry an `Origin`
 equal to `ADMIN_BASE_URL`.
