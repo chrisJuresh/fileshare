@@ -11,7 +11,7 @@ Backups taken by the scripts go to `${APPDATA}/host-backups/<timestamp>/`.
 | # | Change | Made by | Revert |
 |---|--------|---------|--------|
 | 1 | Data, appdata and restic directories | `scripts/init-dirs.sh` | remove the directories (after copying anything you want to keep) |
-| 2 | Secret files in `${APPDATA}/secrets` | `scripts/gen-secrets.sh` | `rm -r ${APPDATA}/secrets` (keep the restic password if you keep the repo) |
+| 2 | Secret files in `${APPDATA}/secrets` (incl. `syncthing-gui-password`, applied to Syncthing's config by `scripts/syncthing-init.sh`) | `scripts/gen-secrets.sh` | `rm -r ${APPDATA}/secrets` (keep the restic password if you keep the repo) |
 | 3 | Docker containers, network, images | `docker compose up` | `docker compose --profile public down`, then remove the images |
 | 4 | Host ports in use | the stack | stopping the stack frees them |
 | 5 | Caddy site block (append-only) | `scripts/caddy/apply.sh` | `scripts/caddy/revert.sh` |

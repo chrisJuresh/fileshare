@@ -35,6 +35,7 @@ cp .env.example .env          # edit: hostnames, LAN_IP, paths, PUID/PGID, ADMIN
 scripts/init-dirs.sh          # data, appdata and restic directories (0750, owned by PUID:PGID)
 scripts/gen-secrets.sh        # secret files under ${APPDATA}/secrets; store the restic password!
 docker compose up -d --build  # app, restic runner, syncthing
+scripts/syncthing-init.sh     # password-protect the Syncthing GUI (idempotent; re-run after deploys)
 docker compose ps             # all healthy?
 scripts/speedtest.sh          # measure upload once; sets the default upload cap
 ```

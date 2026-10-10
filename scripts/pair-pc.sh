@@ -5,6 +5,7 @@
 #   scripts/pair-pc.sh [--dry-run] [--no-restart] <pc-device-id> [pc-lan-ip]
 #
 # What it does (Syncthing REST on SYNCTHING_API_URL, default http://127.0.0.1:8384):
+#   0. protects the GUI with user + password (scripts/syncthing-init.sh)
 #   1. hardens Syncthing options (no usage/crash reporting, no auto-upgrade, no NAT/UPnP,
 #      no relays, no global/local announce; listens on tcp+quic :22000)
 #   2. adds/updates device "pc" (addresses: dynamic [+ tcp://<pc-lan-ip>:22000])
@@ -84,6 +85,13 @@ curl -fsS --max-time 10 "$API_URL/rest/noauth/health" >/dev/null || die "Syncthi
 api GET /rest/system/status >"$work/status.json"
 SERVER_ID=$(py 'import json,sys; print(json.load(open(sys.argv[1]))["myID"])' "$work/status.json")
 [[ $PC_ID != "$SERVER_ID" ]] || die "that is the server's own device ID; use the PC's ID"
+
+# 0. GUI password --------------------------------------------------------------------------
+if $dry; then
+  "$REPO_DIR/scripts/syncthing-init.sh" --dry-run
+else
+  "$REPO_DIR/scripts/syncthing-init.sh"
+fi
 
 apply() { # METHOD PATH BODY_FILE DESCRIPTION
   if $dry; then

@@ -58,6 +58,7 @@ scripts/
   gen-secrets.sh          creates the secrets files (mode 600) if missing
   speedtest.sh            one-off upload measurement in a throwaway container
   pair-pc.sh <device-id>  adds the PC's Syncthing device + shares the outbox (run over SSH)
+  syncthing-init.sh       sets the Syncthing GUI user/password from the secret file (idempotent)
   gen-testdata.sh         synthetic random test files
   caddy/                  the staged Caddy site block + apply/verify helper
   ufw/                    the ufw plan + apply/revert helper
@@ -363,7 +364,7 @@ latestRuns(db): { backup?: BackupRunRow; forget?: BackupRunRow; check?: BackupRu
 | BitTorrent TCP + uTP        | `0.0.0.0:6890` (`BT_PORT`)   | internet (router forward + ufw) |
 | WebRTC ICE (UDP mux)        | `0.0.0.0:6891` (`WEBRTC_PORT`) | internet (router forward + ufw) |
 | Syncthing sync              | `${LAN_IP}:22000` tcp+udp (published) | the PC on the LAN |
-| Syncthing GUI/REST          | `127.0.0.1:8384` (published) | `app` (host network) + operator via SSH tunnel |
+| Syncthing GUI/REST          | `127.0.0.1:8384` (published) | `app` (host network, API key) + operator via SSH tunnel (GUI login `admin` + `syncthing-gui-password`) |
 
 Caddy's public site is on **port 8443 only** (router: external 443 → server 8443). Every URL the app
 emits is built from `PUBLIC_BASE_URL` (e.g. `https://files.example.com`), **never** from the request's
@@ -605,6 +606,7 @@ created by `scripts/gen-secrets.sh`:
 |-------------------------|----------------|
 | `share-hmac-key`        | app            |
 | `syncthing-api-key`     | app, syncthing (`STGUIAPIKEY` via entrypoint from file) |
+| `syncthing-gui-password`| operator: Syncthing GUI user `admin`; set via REST by `scripts/syncthing-init.sh` (Syncthing stores a bcrypt hash) |
 | `restic-password`       | restic runner  |
 | `cloudflare-api-token`  | ddns (created by the user) |
 

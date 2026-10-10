@@ -28,7 +28,12 @@ Logs never contain share tokens, passwords, JWTs or peer IP addresses; keep it t
 adding log lines.
 
 Syncthing GUI (rarely needed): `ssh -L 8384:127.0.0.1:8384 <server>`, then open
-http://localhost:8384 locally.
+http://localhost:8384 locally and log in as **`admin`** with the password in
+`${APPDATA}/secrets/syncthing-gui-password` (view it privately: `less <that file>`; never paste it
+into chat or tickets). The GUI is published on loopback only, and the app also runs on the host
+network, so the password is what keeps other local processes out. `scripts/syncthing-init.sh`
+sets it (idempotent; `pair-pc.sh` runs it too) — run it after every deploy. Syncthing stores only a
+bcrypt hash; the app and scripts keep using the API key, which is unaffected.
 
 ### Restart / apply `.env` changes
 
@@ -177,6 +182,15 @@ mv /srv/appdata/fileshare/secrets/syncthing-api-key{,.old}
 scripts/gen-secrets.sh
 docker compose up -d --force-recreate syncthing app
 shred -u /srv/appdata/fileshare/secrets/syncthing-api-key.old
+```
+
+### Syncthing GUI password (`syncthing-gui-password`)
+
+```bash
+mv /srv/appdata/fileshare/secrets/syncthing-gui-password{,.old}
+scripts/gen-secrets.sh
+scripts/syncthing-init.sh                   # sets the new password (the old login stops working)
+shred -u /srv/appdata/fileshare/secrets/syncthing-gui-password.old
 ```
 
 ### restic password (`restic-password`)
