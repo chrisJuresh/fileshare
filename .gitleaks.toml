@@ -1,0 +1,8 @@
+# gitleaks config: default rules plus a narrow allowlist for synthetic test fixtures.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "synthetic passwords used only in tests"
+regexes = ['''synthetic-pw-\d+''']
+paths = ['''^test/''']
