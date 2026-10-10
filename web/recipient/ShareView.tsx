@@ -138,7 +138,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     if (!hook) return;
     hook.state = (): TestState => {
       const l = latest.current;
-      const s = l.snap;
+      const s = engineRef.current?.snapshot() ?? l.snap;
       return {
         phase: s?.phase ?? 'idle',
         peerId: engineRef.current?.peerId ?? null,

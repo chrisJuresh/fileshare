@@ -162,7 +162,11 @@ export class Engine {
     if (this.torrent !== torrent || torrent.destroyed) return;
 
     this.mapFiles(torrent);
-    for (const i of this.selected) this.fileMap[i]?.select();
+    for (const i of this.selected) {
+      const f = this.fileMap[i];
+      f?.select();
+      f?.once('done', () => queueMicrotask(() => this.tick()));
+    }
     this.webseedUrl = webseedUrlFor(this.info.webseed, torrent);
     this.startedAt = Date.now();
     this.lastPeerDataAt = this.startedAt;
@@ -208,14 +212,15 @@ export class Engine {
     }
 
     const peerWires = t.wires.filter((w) => w.type !== 'webSeed');
-    const missing = this.neededPiecesMissingFromPeers(t, peerWires);
+    // "Peers lack pieces we need" only counts while we have peers; with no peers at all the
+    // no-peer-data timer below decides (connecting over WebRTC can take a few seconds).
+    const missing = peerWires.length > 0 && this.neededPiecesMissingFromPeers(t, peerWires);
     if (missing) this.missingSince ??= now;
     else this.missingSince = null;
 
     if (!active) {
       const stalled = now - this.lastPeerDataAt >= this.webseedAfterMs;
-      const unavailable =
-        this.missingSince !== null && now - this.missingSince >= MISSING_PIECES_GRACE_MS && now - this.startedAt >= MISSING_PIECES_GRACE_MS;
+      const unavailable = this.missingSince !== null && now - this.missingSince >= MISSING_PIECES_GRACE_MS;
       if (stalled || unavailable) {
         try {
           t.addWebSeed(url);
