@@ -147,6 +147,29 @@ export async function wtDiag(page: Page): Promise<unknown> {
   });
 }
 
+/** Diagnostics: CPU-profile the page for `ms` and return the top self-time functions. */
+export async function cpuProfileTop(page: Page, ms = 5000, top = 15): Promise<string[]> {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send('Profiler.enable');
+    await cdp.send('Profiler.start');
+    await new Promise((r) => setTimeout(r, ms));
+    const { profile } = (await cdp.send('Profiler.stop')) as unknown as {
+      profile: { nodes: { id: number; callFrame: { functionName: string; url: string; lineNumber: number; columnNumber: number }; hitCount?: number }[] };
+    };
+    const total = profile.nodes.reduce((a, n) => a + (n.hitCount ?? 0), 0) || 1;
+    const byFn = new Map<string, number>();
+    for (const n of profile.nodes) {
+      const f = n.callFrame;
+      const key = `${f.functionName || '(anon)'} ${f.url.split('/').pop()}:${f.lineNumber + 1}:${f.columnNumber + 1}`;
+      byFn.set(key, (byFn.get(key) ?? 0) + (n.hitCount ?? 0));
+    }
+    return [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, top).map(([k, v]) => `${((v / total) * 100).toFixed(1)}% ${k}`);
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 /** sha256 of every file under OPFS:/fileshare-e2e via WebCrypto (fine for small files only). */
 export async function opfsHashesInPage(page: Page): Promise<Record<string, string>> {
   return page.evaluate(async (dir) => {

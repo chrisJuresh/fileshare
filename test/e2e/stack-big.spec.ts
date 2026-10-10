@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ShareDto, StatsDto } from '../../src/types.ts';
 import { admin, createShare, findIps, fmtMB, SCRATCH, seedItem, setCap, sleep, stack, startHashSink, stripConfigured, worstCapEnvelope, type RateSample } from '../helpers/stack.ts';
-import { closePeers, hookState, launchPeer, opfsHashesViaSink, openAdminLive, startDownload, swarmMessages, wtDiag, type BrowserPeer, type HookState } from '../helpers/swarm.ts';
+import { closePeers, cpuProfileTop, hookState, launchPeer, opfsHashesViaSink, openAdminLive, startDownload, swarmMessages, wtDiag, type BrowserPeer, type HookState } from '../helpers/swarm.ts';
 
 const DIAG = !!process.env.FILESHARE_DIAG;
 
@@ -87,12 +87,23 @@ test('@big 6 Chromium peers, one big share, capped server', async () => {
     // Wait for every peer to finish saving; progress line every 30 s.
     let lastLog = 0;
     let lastDiag = 0;
+    const lastMove = peers.map(() => ({ progress: -1, at: Date.now(), profiled: false }));
+    const stallMs = Number(process.env.FILESHARE_BIG_STALL_MIN ?? 20) * 60_000;
+    let swarmProgress = { sum: -1, at: Date.now() };
     let states: HookState[] = [];
     for (;;) {
       states = await Promise.all(peers.map((p) => hookState(p.page)));
       const errs = states.filter((x) => x.error);
       if (errs.length) throw new Error(`peer error: ${errs.map((x) => x.error).join('; ')}`);
       if (states.every((x) => x.saved)) break;
+      const sum = states.reduce((a, x) => a + x.progress + (x.saved ? 1 : 0), 0);
+      if (sum > swarmProgress.sum + 0.001) swarmProgress = { sum, at: Date.now() };
+      else if (Date.now() - swarmProgress.at > stallMs) {
+        throw new Error(
+          `no progress for ${stallMs / 60_000} min after ${((Date.now() - t0) / 1000).toFixed(0)} s: ` +
+            states.map((x) => `${(x.progress * 100).toFixed(1)}%${x.saved ? ' saved' : ''} (${x.numPeers} conns)`).join(', '),
+        );
+      }
       if (Date.now() - lastLog > 30_000) {
         lastLog = Date.now();
         const last = samples.at(-1);
@@ -102,7 +113,18 @@ test('@big 6 Chromium peers, one big share, capped server', async () => {
             `server ${fmtMB(last?.serverBytes ?? 0)} @ ${fmtMB(last?.bps ?? 0)}/s; free RAM ${(os.freemem() / GiB).toFixed(1)} GiB`,
         );
       }
-      if (DIAG && Date.now() - lastDiag > 10_000) {
+      if (DIAG) {
+        for (const [i, x] of states.entries()) {
+          const m = lastMove[i]!;
+          if (x.progress !== m.progress) Object.assign(m, { progress: x.progress, at: Date.now() });
+          else if (!x.saved && !m.profiled && Date.now() - m.at > 60_000) {
+            m.profiled = true;
+            console.log(`[diag ${i}] stalled at ${(x.progress * 100).toFixed(1)} % for 60 s; wt:`, JSON.stringify(await wtDiag(peers[i]!.page)));
+            console.log(`[diag ${i}] CPU profile:\n  ${(await cpuProfileTop(peers[i]!.page)).join('\n  ')}`);
+          }
+        }
+      }
+      if (DIAG && Date.now() - lastDiag > 60_000) {
         lastDiag = Date.now();
         for (const p of peers) console.log(`[diag ${p.index}]`, JSON.stringify(await wtDiag(p.page)));
         const w = live.messages().at(-1)?.shares[share.id];
