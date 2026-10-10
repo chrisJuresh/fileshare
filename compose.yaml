@@ -85,7 +85,10 @@ services:
       start_period: 60s
 
   restic:
-    <<: [*common, *app-image]
+    <<: *common
+    # Same image as app (built once by the app service; building it twice in parallel races).
+    image: fileshare:local
+    pull_policy: never
     init: true
     command: ["node", "dist/backup/main.js"]
     user: "${PUID}:${PGID}"
