@@ -47,6 +47,8 @@ export interface IngestOptions {
 }
 
 export const OUTBOX_CHANGED_ERROR = 'outbox copy changed after ingest; not removed';
+export const STILL_IN_OUTBOX = "still in the PC outbox — remove it there, or wait until it's ready";
+export const ERROR_STILL_IN_OUTBOX = 'still in the PC outbox — remove it there first, then delete it here';
 
 /** Error with an HTTP status for the admin API (Fastify uses `statusCode`). */
 export class IngestError extends Error {
@@ -789,9 +791,22 @@ class Ingest implements IngestService {
     }
   }
 
+  /**
+   * An outbox item that is not ready still has its outbox entry (removed only after a covering
+   * snapshot). Deleting just the library copy would make the next scan ingest the entry again, and
+   * we never delete an outbox entry that isn't snapshotted. So: refuse, except for `error` items
+   * whose outbox entry is already gone.
+   */
+  private async assertDeletable(row: ItemRow): Promise<void> {
+    if (row.source !== 'outbox' || row.status === 'ready') return;
+    if (row.status !== 'error') throw new IngestError(409, STILL_IN_OUTBOX);
+    if (await exists(this.outboxPath(row.source_name))) throw new IngestError(409, ERROR_STILL_IN_OUTBOX);
+  }
+
   async deleteItem(itemId: string): Promise<void> {
     const pre = this.getItem(itemId);
     if (!pre || pre.status === 'deleted') throw new IngestError(404, 'item not found');
+    await this.assertDeletable(pre);
     // Stop in-flight work first so we don't wait for a long hash.
     this.aborts.get(itemId)?.abort();
     this.hashQueue = this.hashQueue.filter((x) => x !== itemId);
@@ -799,6 +814,7 @@ class Ingest implements IngestService {
     await this.withLock(itemId, async () => {
       const row = this.getItem(itemId);
       if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
+      await this.assertDeletable(row);
       await this.deps.p2p.revokeAllForItem(itemId);
       // The name is reserved for this item, so anything at its library path is ours.
       await rm(this.libraryPath(row.name), { recursive: true, force: true });

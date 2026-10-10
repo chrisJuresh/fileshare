@@ -287,6 +287,11 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
 * **Invariant (tested): an outbox file is never deleted unless it is verified in the library and
   covered by a successful snapshot.**
 * **delete**:
+  0. Outbox items that are not `ready` still have their outbox entry, so deleting only the library
+     copy would re-ingest it on the next scan (and an un-snapshotted outbox entry is never deleted).
+     Such a delete is a **409** "still in the PC outbox — remove it there, or wait until it's ready".
+     Exception: an `error` item whose outbox entry is already gone can be deleted. The dashboard
+     hides Delete for outbox items in `incoming`/`stabilising`/`hashing`/`snapshotting`.
   1. Revoke all shares (stops seeding).
   2. `rm -r` the library entry.
   3. Set status `deleted`, `deleted_at`, and the tombstone name `<name> [deleted <id>]`, so the name
@@ -415,7 +420,7 @@ equal to `ADMIN_BASE_URL`.
 | GET | `/`, `/assets/*` | server | dashboard static (`dist/web/admin/`) |
 | GET | `/api/admin/items` | admin | `ItemDto[]` |
 | PATCH | `/api/admin/items/:id` | admin→ingest | `{name}` rename |
-| DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares) |
+| DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares). 409 for an outbox item that is not ready (an `error` one: while its outbox entry exists), see §4 |
 | POST | `/api/admin/items/:id/retry` | admin→ingest | retry after error |
 | GET | `/api/admin/items/:id/files` | admin | `{path,length}[]` |
 | GET | `/api/admin/shares` | admin | `ShareDto[]` (incl. stats) |
