@@ -1,6 +1,7 @@
 // Recipient page: screens before unlock must reveal nothing; password, rate-limit and revocation states.
 import { expect, test } from '@playwright/test';
 import { type RecipientMock, startRecipientMock } from '../helpers/recipient-mock.ts';
+import { openBrowserDownload } from '../helpers/recipient-page.ts';
 
 test.use({ browserName: 'chromium', launchOptions: { args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] } });
 
@@ -38,6 +39,11 @@ test('open share asks for a name first and reveals nothing before it', async ({ 
     await page.getByLabel('Your name').fill('Synthetic Sam');
     await page.getByRole('button', { name: 'Continue' }).click();
     await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    // The torrent app comes first; the in-browser download is collapsed until opened.
+    await expect(page.getByRole('link', { name: 'Download .torrent file' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Choose folder and download' })).toBeHidden();
+    await page.getByText('Download in your browser', { exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Choose folder and download' })).toBeVisible();
     expect(open.stats.unlockNames).toEqual(['Synthetic Sam']);
     // Remembered on this browser: the next visit goes straight to the files.
     await page.evaluate(() => sessionStorage.clear());
@@ -110,6 +116,7 @@ test('revocation mid-download stops and explains', async ({ page }) => {
     });
     await page.goto(slow.shareUrl);
     await expect(page.getByRole('heading', { name: slow.name })).toBeVisible();
+    await openBrowserDownload(page);
     await page.getByRole('button', { name: 'Choose folder and download' }).click();
     await expect(page.getByRole('heading', { name: 'Downloading' })).toBeVisible();
     await expect.poll(() => slow.stats.webseedBytes, { timeout: 20_000 }).toBeGreaterThan(0);

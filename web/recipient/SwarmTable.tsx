@@ -62,7 +62,6 @@ export function SwarmTable({ swarm, connected, children }: { swarm: SwarmView | 
         )}
         {children}
       </div>
-      <p class="footnote">People on this list connect directly, so they can see each other's IP address. It is never stored or shown here.</p>
     </section>
   );
 }

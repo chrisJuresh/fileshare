@@ -4,6 +4,7 @@ import { type Page, expect, test } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { type RecipientMock, startRecipientMock } from '../helpers/recipient-mock.ts';
+import { openBrowserDownload } from '../helpers/recipient-page.ts';
 import { storedZipHashes } from '../helpers/recipient-zip.ts';
 
 test.use({
@@ -38,8 +39,9 @@ test('per-file save via the service worker and a streamed zip of everything', as
   await page.getByLabel('Your name').fill('Synthetic Sam');
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
-  expect((await hookState(page)).saveMode).toBe('serviceworker');
+  await expect.poll(async () => (await hookState(page)).saveMode).toBe('serviceworker'); // hook is installed after mount
 
+  await openBrowserDownload(page);
   await page.getByRole('button', { name: 'Start download' }).click();
   const t0 = Date.now();
   await expect

@@ -2,6 +2,7 @@
 // OPFS directory through the test hook), then verify the written files' hashes.
 import { type Page, expect, test } from '@playwright/test';
 import { type RecipientMock, startRecipientMock } from '../helpers/recipient-mock.ts';
+import { openBrowserDownload } from '../helpers/recipient-page.ts';
 
 test.use({ browserName: 'chromium', launchOptions: { args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] } });
 test.setTimeout(120_000);
@@ -60,6 +61,7 @@ async function unlockAndDownload(page: Page, mock: RecipientMock, untick: string
   }
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
   expect(mock.stats.unlockNames.at(-1)).toBe('Synthetic Sam');
+  await openBrowserDownload(page);
   if (untick) {
     const box = page.getByRole('checkbox', { name: untick, exact: true });
     await expect(box).toBeChecked();
@@ -148,6 +150,7 @@ test.describe('P2P from the seeder', () => {
       }
     });
     await page.reload();
+    await openBrowserDownload(page);
     await expect(page.getByRole('button', { name: 'Choose folder and download' })).toBeEnabled();
     expect((await hookState(page)).done).toBe(false);
     expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('fileshare.seeding.')))).toEqual([]);

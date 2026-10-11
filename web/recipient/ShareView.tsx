@@ -42,6 +42,8 @@ interface StorageProblem {
 
 /** Extra room we want beyond the selected bytes (piece boundaries, metadata). */
 const STORAGE_SLACK = 64 * 1024 * 1024;
+/** Above this, the in-browser download carries a warning pointing to a torrent app. */
+const BIG_BROWSER_DOWNLOAD = 1_000_000_000;
 
 export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) {
   const root = useMemo(() => buildTree(info.files), [info]);
@@ -62,6 +64,8 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
   const [initError, setInitError] = useState<string | null>(null);
   const [phone] = useState(isPhone);
   const [webrtc] = useState(hasWebRTC);
+  /** The in-browser download is tucked away until opened, or until it is running (resumed seeding included). */
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const engineRef = useRef<Engine | null>(null);
   const liveRef = useRef<LiveSocket | null>(null);
@@ -164,6 +168,10 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
       };
     };
   }, []);
+
+  useEffect(() => {
+    if (started) setBrowserOpen(true);
+  }, [started]);
 
   const phase = snap?.phase ?? 'idle';
   const active = started && (phase === 'starting' || phase === 'downloading' || phase === 'complete');
@@ -356,146 +364,152 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           seeding afterwards so others get the files faster.
         </p>
         <div class="actions">
-          <a class="btn primary" href={info.torrentUrl} download={`${info.name}.torrent`}>
+          <a class="btn green" href={info.torrentUrl} download={`${info.name}.torrent`}>
             Download .torrent file
           </a>
-          <a class="btn" href={info.magnet}>
+          <a class="btn green" href={info.magnet}>
             Open magnet link
           </a>
-          <CopyButton text={info.magnet} label="Copy magnet link" />
+          <CopyButton text={info.magnet} label="Copy magnet link" className="btn green" />
         </div>
         <p class="hint">These links carry your name, so don't pass them on. Send others the page link instead.</p>
       </section>
 
-      <section class="section" aria-labelledby="browser-h">
-        <div class="section-head">
-          <h2 id="browser-h">Or download in your browser</h2>
-        </div>
-        {phone && <p class="notice">On a phone, downloads are slower and won't help others much.</p>}
-        {!webrtc && (
-          <p class="notice">Your browser can't connect to other people, so this downloads from the server. It works, but slower.</p>
-        )}
-        {initError && (
-          <p class="error" role="alert">
-            {initError}
-          </p>
-        )}
-
-        <section class="panel" aria-label="Files">
-          {fileCount > 1 && (
-            <div class={started ? 'panel-head started' : 'panel-head'}>
-              <label class="name">
-                <input
-                  type="checkbox"
-                  class="check"
-                  checked={allState === 'all'}
-                  indeterminate={allState === 'some'}
-                  disabled={started}
-                  onChange={() => onToggle(root)}
-                />
-                <span>Name</span>
-              </label>
-              <span>Size</span>
-            </div>
+      <details class="browser-dl" open={browserOpen} onToggle={(e) => setBrowserOpen((e.currentTarget as HTMLDetailsElement).open)}>
+        <summary>Download in your browser</summary>
+        <div class="browser-body">
+          {selectedBytes > BIG_BROWSER_DOWNLOAD && !started && (
+            <p class="warning" role="note">
+              This download is {formatBytes(selectedBytes)}. At that size a browser download needs a lot of browser storage
+              and this tab open the whole time. A torrent app is much more reliable.
+            </p>
           )}
-          <FileTree
-            root={root}
-            files={info.files}
-            selected={selected}
-            onToggle={onToggle}
-            locked={started}
-            progress={started && snap && snap.phase !== 'starting' ? snap.files : null}
-            saveStates={saveStates}
-            saveUrl={saveUrl}
-          />
+          {phone && <p class="notice">On a phone, downloads are slower and won't help others much.</p>}
+          {!webrtc && (
+            <p class="notice">Your browser can't connect to other people, so this downloads from the server. It works, but slower.</p>
+          )}
+          {initError && (
+            <p class="error" role="alert">
+              {initError}
+            </p>
+          )}
 
-          <div class="panel-foot">
-            {!started && (
-              <div class="foot-row">
-                <p class="muted" aria-live="polite">
-                  {selected.size} of {fileCount} selected · {formatBytes(selectedBytes)}
-                </p>
-                {saveMode === 'directory' && (
-                  <button type="button" class="btn" disabled={selected.size === 0 || !snap} onClick={() => void startDirectory()}>
-                    Choose folder and download
-                  </button>
-                )}
-                {saveMode === 'serviceworker' && (
-                  <button type="button" class="btn" disabled={selected.size === 0 || !snap} onClick={() => void startServiceWorker(false)}>
-                    Start download
-                  </button>
-                )}
+          <section class="panel" aria-label="Files">
+            {fileCount > 1 && (
+              <div class={started ? 'panel-head started' : 'panel-head'}>
+                <label class="name">
+                  <input
+                    type="checkbox"
+                    class="check"
+                    checked={allState === 'all'}
+                    indeterminate={allState === 'some'}
+                    disabled={started}
+                    onChange={() => onToggle(root)}
+                  />
+                  <span>Name</span>
+                </label>
+                <span>Size</span>
               </div>
             )}
-            {!started && saveMode !== 'none' && (
-              <p class="hint">Use this only if you can't use a torrent app. It stops when you close this tab.</p>
-            )}
-            {!started && saveMode === 'none' && (
-              <p class="notice">This browser can't save large downloads from this page. Use the direct links below.</p>
-            )}
+            <FileTree
+              root={root}
+              files={info.files}
+              selected={selected}
+              onToggle={onToggle}
+              locked={started}
+              progress={started && snap && snap.phase !== 'starting' ? snap.files : null}
+              saveStates={saveStates}
+              saveUrl={saveUrl}
+            />
 
-            {started && snap && (
-              <div class="progress" aria-labelledby="progress-h">
-                <div class="progress-head">
-                  <h2 id="progress-h">
-                    {done ? 'All done' : snap.phase === 'error' ? 'Download problem' : snap.resumed ? 'Checking your earlier download' : 'Downloading'}
-                  </h2>
-                  <span class="pct-big">{formatPercent(snap.progress)}</span>
-                </div>
-                <progress class="bar" max={1} value={snap.progress} aria-label="Overall progress" />
-                <p class="stats muted" aria-live="polite">
-                  {formatBytes(snap.doneBytes)} of {formatBytes(snap.selectedBytes)}
-                  {!done && snap.phase === 'downloading' && ` · ${formatSpeed(snap.down)}`}
-                  {!done && snap.phase === 'downloading' && snap.eta !== null && Number.isFinite(snap.eta) && snap.eta >= 0 && ` ·${formatEta(snap.eta)} left`}
-                  {` · ${snap.numPeers} ${snap.numPeers === 1 ? 'peer' : 'peers'}`}
-                  {snap.webseedActive ? ' + server' : ''}
-                  {snap.phase === 'starting' ? ' · getting ready…' : ''}
-                </p>
-                {snap.error && (
-                  <p class="error" role="alert">
-                    {snap.error}
+            <div class="panel-foot">
+              {!started && (
+                <div class="foot-row">
+                  <p class="muted" aria-live="polite">
+                    {selected.size} of {fileCount} selected · {formatBytes(selectedBytes)}
                   </p>
-                )}
-                {done && snap.resumed && <p class="ok-text">You downloaded these files on an earlier visit.</p>}
-                {done && saveMode === 'directory' && !snap.resumed && (allSaved || saving) && (
-                  <p class="ok-text">{allSaved ? 'Everything is saved in the folder you chose.' : 'Finishing saving…'}</p>
-                )}
-                {done && saveMode === 'serviceworker' && (
-                  <div class="foot-row">
-                    <p>Save files one by one, or everything at once.</p>
-                    <button type="button" class="btn primary" disabled={zipBusy} onClick={() => void downloadAll()}>
-                      {zipBusy ? 'Preparing zip…' : 'Download all (.zip)'}
+                  {saveMode === 'directory' && (
+                    <button type="button" class="btn" disabled={selected.size === 0 || !snap} onClick={() => void startDirectory()}>
+                      Choose folder and download
                     </button>
-                  </div>
-                )}
-                <p class="hint">
-                  {done
-                    ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open, or reopen the link later, to help them finish faster.`
-                    : 'Keep this tab open to help others download faster.'}
-                </p>
-              </div>
-            )}
+                  )}
+                  {saveMode === 'serviceworker' && (
+                    <button type="button" class="btn" disabled={selected.size === 0 || !snap} onClick={() => void startServiceWorker(false)}>
+                      Start download
+                    </button>
+                  )}
+                </div>
+              )}
+              {!started && saveMode !== 'none' && (
+                <p class="hint">Use this only if you can't use a torrent app. It stops when you close this tab.</p>
+              )}
+              {!started && saveMode === 'none' && (
+                <p class="notice">This browser can't save large downloads from this page. Use the direct links below.</p>
+              )}
 
-            {storage && (
-              <StorageWarning
-                problem={storage}
-                info={info}
-                selected={selectedList()}
-                canForce={saveMode === 'serviceworker' && !started}
-                onForce={() => void startServiceWorker(true)}
-              />
-            )}
-            {problem && (
-              <p class="error" role="alert">
-                {problem}
-              </p>
-            )}
-            {(saveMode === 'none' || (problem && saveMode === 'serviceworker' && !started)) && (
-              <DirectLinks info={info} selected={selectedList()} />
-            )}
-          </div>
-        </section>
-      </section>
+              {started && snap && (
+                <div class="progress" aria-labelledby="progress-h">
+                  <div class="progress-head">
+                    <h2 id="progress-h">
+                      {done ? 'All done' : snap.phase === 'error' ? 'Download problem' : snap.resumed ? 'Checking your earlier download' : 'Downloading'}
+                    </h2>
+                    <span class="pct-big">{formatPercent(snap.progress)}</span>
+                  </div>
+                  <progress class="bar" max={1} value={snap.progress} aria-label="Overall progress" />
+                  <p class="stats muted" aria-live="polite">
+                    {formatBytes(snap.doneBytes)} of {formatBytes(snap.selectedBytes)}
+                    {!done && snap.phase === 'downloading' && ` · ${formatSpeed(snap.down)}`}
+                    {!done && snap.phase === 'downloading' && snap.eta !== null && Number.isFinite(snap.eta) && snap.eta >= 0 && ` ·${formatEta(snap.eta)} left`}
+                    {` · ${snap.numPeers} ${snap.numPeers === 1 ? 'peer' : 'peers'}`}
+                    {snap.webseedActive ? ' + server' : ''}
+                    {snap.phase === 'starting' ? ' · getting ready…' : ''}
+                  </p>
+                  {snap.error && (
+                    <p class="error" role="alert">
+                      {snap.error}
+                    </p>
+                  )}
+                  {done && snap.resumed && <p class="ok-text">You downloaded these files on an earlier visit.</p>}
+                  {done && saveMode === 'directory' && !snap.resumed && (allSaved || saving) && (
+                    <p class="ok-text">{allSaved ? 'Everything is saved in the folder you chose.' : 'Finishing saving…'}</p>
+                  )}
+                  {done && saveMode === 'serviceworker' && (
+                    <div class="foot-row">
+                      <p>Save files one by one, or everything at once.</p>
+                      <button type="button" class="btn primary" disabled={zipBusy} onClick={() => void downloadAll()}>
+                        {zipBusy ? 'Preparing zip…' : 'Download all (.zip)'}
+                      </button>
+                    </div>
+                  )}
+                  <p class="hint">
+                    {done
+                      ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open, or reopen the link later, to help them finish faster.`
+                      : 'Keep this tab open to help others download faster.'}
+                  </p>
+                </div>
+              )}
+
+              {storage && (
+                <StorageWarning
+                  problem={storage}
+                  info={info}
+                  selected={selectedList()}
+                  canForce={saveMode === 'serviceworker' && !started}
+                  onForce={() => void startServiceWorker(true)}
+                />
+              )}
+              {problem && (
+                <p class="error" role="alert">
+                  {problem}
+                </p>
+              )}
+              {(saveMode === 'none' || (problem && saveMode === 'serviceworker' && !started)) && (
+                <DirectLinks info={info} selected={selectedList()} />
+              )}
+            </div>
+          </section>
+        </div>
+      </details>
 
       <SwarmTable swarm={swarm} connected={liveConnected}>
         <form
@@ -530,12 +544,12 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
   );
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+function CopyButton({ text, label, className = 'btn' }: { text: string; label: string; className?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
-      class="btn"
+      class={className}
       onClick={() => {
         void navigator.clipboard?.writeText(text).then(
           () => {

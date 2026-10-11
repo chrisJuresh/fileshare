@@ -17,6 +17,8 @@
   --warn-bg: #fffaeb;
   --warn-border: #f2dfa6;
   --warn-fg: #6d4c00;
+  --green: #15803d;
+  --green-hover: #166534;
   --radius: 12px;
   --radius-sm: 8px;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, Roboto, 'Helvetica Neue',
@@ -44,6 +46,8 @@
     --warn-bg: #221c0e;
     --warn-border: #463815;
     --warn-fg: #f2d68e;
+    --green: #15803d;
+    --green-hover: #16a34a;
     --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' fill='none' stroke='%23121215' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     --dash: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8h7' fill='none' stroke='%23121215' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
   }
@@ -281,6 +285,31 @@ p {
   font-size: 0.875rem;
 }
 
+/* In-browser download: collapsed until opened */
+.browser-dl > summary {
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+
+.browser-dl > summary:hover {
+  color: var(--fg);
+}
+
+.browser-dl[open] > summary {
+  color: var(--fg);
+}
+
+.browser-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
 /* Torrent app: the recommended way */
 .panel.torrent {
   display: flex;
@@ -317,12 +346,6 @@ p {
   padding: 18px 16px;
   color: var(--muted);
   font-size: 0.875rem;
-}
-
-.footnote {
-  color: var(--faint);
-  font-size: 0.8125rem;
-  padding: 0 2px;
 }
 
 .notice {
@@ -423,6 +446,17 @@ summary:focus-visible,
 
 .btn.primary:hover:not(:disabled) {
   opacity: 0.88;
+}
+
+.btn.green {
+  background: var(--green);
+  border-color: var(--green);
+  color: #ffffff;
+}
+
+.btn.green:hover {
+  background: var(--green-hover);
+  border-color: var(--green-hover);
 }
 
 .btn.block {
@@ -906,7 +940,7 @@ details[open] > summary::after {
     flex: 1 1 auto;
   }
 
-  .torrent .actions .btn.primary {
+  .torrent .actions .btn:first-child {
     flex-basis: 100%;
     height: 40px;
   }

@@ -7,6 +7,7 @@ import path from 'node:path';
 import WebTorrent from 'webtorrent';
 import WebSocket from 'ws';
 import type { AdminLiveMsg, ServerMsg } from '../../src/types.ts';
+import { openBrowserDownload } from './recipient-page.ts';
 import { adminToken, stack } from './stack.ts';
 
 export const OUT_DIR = 'fileshare-e2e';
@@ -107,10 +108,11 @@ export async function startDownload(peer: BrowserPeer, shareUrl: string, passwor
     await page.getByLabel('Password').fill(password);
     await page.getByRole('button', { name: 'Open' }).click();
   }
+  await page.locator('details.browser-dl').waitFor({ state: 'attached', timeout: 30_000 });
+  await openBrowserDownload(page);
   const btn = page.getByRole('button', { name: 'Choose folder and download' });
   await btn.waitFor({ state: 'visible', timeout: 30_000 });
-  await page.waitForFunction(() => !(document.querySelector('button.primary.big') as HTMLButtonElement | null)?.disabled, null, { timeout: 30_000 });
-  await btn.click();
+  await btn.click({ timeout: 30_000 }); // waits until enabled (the engine is ready)
 }
 
 export async function hookState(page: Page): Promise<HookState> {

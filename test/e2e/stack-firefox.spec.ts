@@ -3,6 +3,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { openBrowserDownload } from '../helpers/recipient-page.ts';
 import { storedZipHashes } from '../helpers/recipient-zip.ts';
 import { createShare, seedItem } from '../helpers/stack.ts';
 
@@ -32,8 +33,9 @@ test('Firefox: per-file save and streamed zip from the real app', async ({ page 
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Open' }).click();
   await expect(page.getByRole('heading', { name: item.name })).toBeVisible();
-  expect((await hookState(page)).saveMode).toBe('serviceworker');
+  await expect.poll(async () => (await hookState(page)).saveMode).toBe('serviceworker'); // hook is installed after mount
 
+  await openBrowserDownload(page);
   await page.getByRole('button', { name: 'Start download' }).click();
   await expect.poll(async () => (await hookState(page)).done, { timeout: 120_000, intervals: [1000] }).toBe(true);
   const st = await hookState(page);
