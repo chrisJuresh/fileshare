@@ -95,9 +95,12 @@ test('token is kept per tab: reload does not re-prompt; never in localStorage or
   expect(page.url()).not.toContain(mock.token);
   const local = await page.evaluate(() => JSON.stringify(localStorage));
   expect(local).not.toContain(mock.token);
+  const swaps = mock.stats.nameSwaps.length;
   await page.reload();
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
   await expect(page.getByLabel('Password')).toHaveCount(0);
+  // The mock's token carries no name, so the reloaded page swaps it for one that does.
+  await expect.poll(() => mock.stats.nameSwaps.slice(swaps)).toEqual(['Synthetic Sam']);
 });
 
 test('revocation mid-download stops and explains', async ({ page }) => {

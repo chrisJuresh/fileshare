@@ -368,6 +368,36 @@ describe('p2p end-to-end', () => {
     expect(env.logs.join('')).not.toContain('Synthetic Sam');
   });
 
+  it('swaps a valid token for a named one (/name), granting nothing more', async () => {
+    const share = await p2p.createShare({ itemId: item.id });
+    const other = await p2p.createShare({ itemId: item.id });
+    const plain = p2p.shares.token(p2p.shares.getRow(share.id)!);
+    const name = (id: string, body: unknown) =>
+      fetch(`${base}/api/s/${id}/name`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await name(share.id, { token: plain, name: ' Synthetic Chris ' });
+    expect(r.status).toBe(200);
+    const u = (await r.json()) as UnlockResponse;
+    expect(u.token.split('.')).toHaveLength(4);
+    const auth = p2p.shares.authorize(u.token);
+    expect(auth.ok && auth.recipient?.name).toBe('Synthetic Chris');
+    expect((await parsedTorrentFor(u)).announce.every((x: string) => x.includes(`/tr/${u.token}`))).toBe(true);
+    // A recipient token can be swapped again (name change); the old one stays valid.
+    const renamed = (await (await name(share.id, { token: u.token, name: 'Synthetic Kris' })).json()) as UnlockResponse;
+    expect(p2p.shares.authorize(renamed.token).ok && (p2p.shares.authorize(renamed.token) as { recipient?: { name: string } }).recipient?.name).toBe('Synthetic Kris');
+    expect(p2p.shares.authorize(u.token).ok).toBe(true);
+    // Bad input, wrong share, bad token, gone share.
+    expect((await name(share.id, { token: plain, name: '   ' })).status).toBe(400);
+    expect((await name(share.id, { token: plain })).status).toBe(400);
+    expect((await name(share.id, { name: 'x' })).status).toBe(400);
+    expect((await name(other.id, { token: plain, name: 'x' })).status).toBe(401);
+    expect((await name(share.id, { token: plain.slice(0, -1) + (plain.endsWith('A') ? 'B' : 'A'), name: 'x' })).status).toBe(401);
+    await p2p.revokeShare(share.id);
+    expect((await name(share.id, { token: plain, name: 'x' })).status).toBe(404);
+    const opened = env.ctx.db.prepare("SELECT detail FROM share_events WHERE share_id = ? AND type = 'unlocked' ORDER BY id").all(share.id);
+    expect(opened).toEqual([{ detail: '{"name":"Synthetic Chris"}' }, { detail: '{"name":"Synthetic Kris"}' }]);
+    expect(env.logs.join('')).not.toContain(u.token);
+  });
+
   it('never logs or persists tokens or client IPs', async () => {
     const all = env.logs.join('');
     expect(all).not.toMatch(/198\.51\.100|203\.0\.113/);

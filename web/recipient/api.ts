@@ -65,6 +65,37 @@ export async function unlock(id: string, name: string, password?: string): Promi
   }
 }
 
+export type NameResult = { ok: true; data: UnlockResponse } | { ok: false; reason: 'gone' | 'invalid' | 'error' };
+
+/** Swap a valid token for one carrying `name`, so the .torrent / magnet links name this recipient. */
+export async function nameToken(id: string, token: string, name: string): Promise<NameResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${base(id)}/name`, {
+      ...fetchOpts,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, name }),
+    });
+  } catch {
+    return { ok: false, reason: 'error' };
+  }
+  if (res.status === 404) return { ok: false, reason: 'gone' };
+  if (res.status === 401) return { ok: false, reason: 'invalid' };
+  if (!res.ok) return { ok: false, reason: 'error' };
+  try {
+    const data = (await res.json()) as UnlockResponse;
+    return isUnlockResponse(data) ? { ok: true, data } : { ok: false, reason: 'error' };
+  } catch {
+    return { ok: false, reason: 'error' };
+  }
+}
+
+/** Plain tokens have 3 dot-separated parts; recipient tokens (which carry a name) have 4. */
+export function tokenHasName(token: string): boolean {
+  return token.split('.').length === 4;
+}
+
 function isUnlockResponse(d: unknown): d is UnlockResponse {
   if (!d || typeof d !== 'object') return false;
   const u = d as Record<string, unknown>;

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { UnlockResponse } from '../../src/types.ts';
-import { cleanNick, loadNick, saveNick } from './api.ts';
+import { cleanNick, loadNick, nameToken, saveNick, saveSession } from './api.ts';
 import { Engine, type EngineSnapshot, directUrl, prepareStore } from './engine.ts';
 import {
   type SaveMode,
@@ -329,6 +329,11 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     }
   };
 
+  // The torrent-app links carry the recipient's name (recipient token); renaming fetches new ones.
+  // The engine keeps the token it started with (still valid; its own rows are labelled by nick).
+  const [links, setLinks] = useState({ torrentUrl: info.torrentUrl, magnet: info.magnet });
+  const linksToken = useRef(info.token);
+
   const onNick = (value: string): void => setNick(value.slice(0, 24));
   /** A name is required: clearing the field puts the last saved name back. */
   const commitNick = (): void => {
@@ -341,6 +346,12 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     if (clean === loadNick()) return;
     saveNick(clean);
     liveRef.current?.setNick(clean);
+    void nameToken(shareId, linksToken.current, clean).then((r) => {
+      if (!r.ok || cleanNick(loadNick()) !== clean) return; // gone/revoked is handled by the live socket
+      linksToken.current = r.data.token;
+      setLinks({ torrentUrl: r.data.torrentUrl, magnet: r.data.magnet });
+      saveSession(shareId, r.data);
+    });
   };
 
   const fileCount = info.files.length;
@@ -365,13 +376,13 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           seeding afterwards so others get the files faster.
         </p>
         <div class="actions">
-          <a class="btn green" href={info.torrentUrl} download={`${info.name}.torrent`}>
+          <a class="btn green" href={links.torrentUrl} download={`${info.name}.torrent`}>
             Download .torrent file
           </a>
-          <a class="btn green" href={info.magnet}>
+          <a class="btn green" href={links.magnet}>
             Open magnet link
           </a>
-          <CopyButton text={info.magnet} label="Copy magnet link" />
+          <CopyButton text={links.magnet} label="Copy magnet link" />
         </div>
         <p class="hint">These links carry your name, so don't pass them on. Send others the page link instead.</p>
       </section>

@@ -2,10 +2,12 @@
 //   GET  /api/s/:shareId           status (unknown / revoked / expired are all `gone`)
 //   POST /api/s/:shareId/unlock    password check (argon2 verify only) → UnlockResponse; records the
 //                                  recipient's self-chosen name (if given) on the `unlocked` event
+//   POST /api/s/:shareId/name      valid token + name → UnlockResponse with that name's recipient token
 //   GET  /api/s/:shareId/torrent   .torrent for a valid token
 // All URLs come from PUBLIC_BASE_URL. Client IPs are used in memory for rate limiting only.
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AppContext } from '../context.js';
+import type { ShareRow } from '../db/index.js';
 import type { ShareStatusResponse, UnlockResponse } from '../types.js';
 import { buildMagnet, buildTorrentFile, shareUrls, torrentContentDisposition } from './metainfo.js';
 import { RecentOnce, Semaphore, UnlockRateLimiter } from './ratelimit.js';
@@ -85,26 +87,47 @@ export async function registerShareApi(app: FastifyInstance, ctx: AppContext, de
       if (unlockEvents.first(`${cur.id}\n${name ?? ''}`, req.ip || 'unknown')) shares.event(cur.id, 'unlocked', name ? { name } : undefined);
       // A named recipient gets a recipient token: the .torrent, magnet and tracker URLs built from it
       // carry their name to the tracker, so a torrent app using them is labelled too.
-      const token = shares.token(cur, name ? shares.recipientId(cur.id, name) : undefined);
-      const urls = shareUrls(ctx.config, cur.id, token);
-      const info = shares.info(cur);
-      const body: UnlockResponse = {
-        token,
-        infoHash: cur.info_hash,
-        name: cur.torrent_name,
-        totalBytes: info.totalBytes,
-        pieceLength: info.pieceLength,
-        files: info.files.map((f) => ({ path: f.path, length: f.length })),
-        torrentUrl: urls.torrent,
-        magnet: buildMagnet(cur.info_hash, cur.torrent_name, urls),
-        announce: { ws: urls.trackerWs, http: urls.trackerHttp },
-        webseed: urls.webseed,
-        iceServers: ctx.config.stunUrls.map((urls) => ({ urls })),
-        expiresAt: cur.expires_at,
-      };
-      return reply.send(body);
+      return reply.send(unlockBody(cur, shares.token(cur, name ? shares.recipientId(cur.id, name) : undefined)));
     },
   );
+
+  // Swap a valid token for the recipient token of a (new) name: a page that unlocked before it had a
+  // name, or whose recipient changed their name, gets .torrent/magnet links that carry the name.
+  // Grants nothing the presented token doesn't already grant (same share, same token_version).
+  app.post<{ Params: { shareId: string }; Body: unknown }>('/api/s/:shareId/name', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const b = req.body as { token?: unknown; name?: unknown } | undefined | null;
+    if (!b || typeof b !== 'object' || Array.isArray(b) || typeof b.token !== 'string' || typeof b.name !== 'string' || b.name.length > MAX_NAME_CHARS) {
+      return reply.code(400).send({ error: 'bad_request' });
+    }
+    const name = sanitizeNick(b.name);
+    if (!name) return reply.code(400).send({ error: 'bad_request' });
+    const auth = shares.authorize(b.token);
+    if (!auth.ok) return auth.reason === 'gone' ? gone(reply) : reply.code(401).send({ error: 'invalid' });
+    if (auth.share.id !== req.params.shareId) return reply.code(401).send({ error: 'invalid' });
+    const cur = auth.share;
+    if (unlockEvents.first(`${cur.id}\n${name}`, req.ip || 'unknown')) shares.event(cur.id, 'unlocked', { name });
+    return reply.send(unlockBody(cur, shares.token(cur, shares.recipientId(cur.id, name))));
+  });
+
+  function unlockBody(cur: ShareRow, token: string): UnlockResponse {
+    const urls = shareUrls(ctx.config, cur.id, token);
+    const info = shares.info(cur);
+    return {
+      token,
+      infoHash: cur.info_hash,
+      name: cur.torrent_name,
+      totalBytes: info.totalBytes,
+      pieceLength: info.pieceLength,
+      files: info.files.map((f) => ({ path: f.path, length: f.length })),
+      torrentUrl: urls.torrent,
+      magnet: buildMagnet(cur.info_hash, cur.torrent_name, urls),
+      announce: { ws: urls.trackerWs, http: urls.trackerHttp },
+      webseed: urls.webseed,
+      iceServers: ctx.config.stunUrls.map((urls) => ({ urls })),
+      expiresAt: cur.expires_at,
+    };
+  }
 
   app.get<{ Params: { shareId: string }; Querystring: { t?: string } }>('/api/s/:shareId/torrent', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');

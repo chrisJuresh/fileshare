@@ -397,6 +397,7 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |
 | POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string, name?: string}` → 200 `UnlockResponse` (§7.3) / 400 `{error:'bad_request'}` (`name` not a string or > 256 chars) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event (detail `{name}` when a name was given, sanitised like nicknames §8) is written at most once per (share, name, client) per 10 min, so several people behind one NAT each get one. |
+| POST | `/api/s/:shareId/name` | p2p | body `{token, name}` → 200 `UnlockResponse` whose token is the recipient token for that name (§9) / 400 (missing or empty name, name > 256 chars) / 401 `{error:'invalid'}` (bad token or another share's) / 404 `{error:'gone'}`. Grants nothing beyond the presented token (same share and token_version). Used by the page when it has a name but its saved token has none (unlocked before giving one), and when the recipient changes their name, so the .torrent/magnet links carry it. Writes an `unlocked` event with the name (same 10 min dedupe as unlock). |
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
 | GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
 | GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers). At most 500 sockets per share and 5000 in total; beyond that the socket is closed with 1013. |
@@ -555,8 +556,9 @@ server → client (every ~1.5 s, and on change):
   `mac = base64url(HMAC-SHA256(SHARE_HMAC_KEY, "fileshare/share/v1\n" + shareId + "\n" + tokenVersion))[0..22]`.
 * **Recipient token**: `<shareId>.<tokenVersion>.<recipientId>.<mac>`, where
   `mac = base64url(HMAC-SHA256(SHARE_HMAC_KEY, "fileshare/share-recipient/v1\n" + shareId + "\n" + tokenVersion + "\n" + recipientId))[0..22]`.
-  `unlock` with a `name` returns one (the `share_recipients` row for (share, name) is reused or
-  created; past the per-share cap, a plain token). Every URL built from it (.torrent announce and
+  `unlock` with a `name` returns one, and so does `POST /api/s/:id/name` for a page that already
+  holds a valid token (the `share_recipients` row for (share, name) is reused or created; past the
+  per-share cap, unlock returns a plain token). Every URL built from it (.torrent announce and
   url-list, magnet, webseed, live socket) carries it, so the tracker labels a torrent app using that
   .torrent/magnet with the name and stores it on its `completed` event. The name labels the **link
   copy**, not the person: whoever is given that .torrent/magnet appears under it.

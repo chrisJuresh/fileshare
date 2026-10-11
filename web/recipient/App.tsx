@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { UnlockResponse } from '../../src/types.ts';
-import { cleanNick, clearSession, getShareStatus, loadNick, loadSession, saveNick, saveSession, shareIdFromLocation, unlock } from './api.ts';
+import {
+  cleanNick,
+  clearSession,
+  getShareStatus,
+  loadNick,
+  loadSession,
+  nameToken,
+  saveNick,
+  saveSession,
+  shareIdFromLocation,
+  tokenHasName,
+  unlock,
+} from './api.ts';
 import { Logo } from './icons.tsx';
 import { ShareView } from './ShareView.tsx';
 
@@ -31,7 +43,23 @@ export function App() {
       }
       // Everyone gives a name before downloading; one remembered from an earlier visit is reused.
       const name = loadNick();
-      const saved = loadSession(shareId);
+      let saved = loadSession(shareId);
+      if (saved && name && !tokenHasName(saved.token)) {
+        // Unlocked before it had a name (or before names existed): swap for a token carrying it, so
+        // the .torrent / magnet links name this recipient.
+        const r = await nameToken(shareId, saved.token, name);
+        if (r.ok) {
+          saveSession(shareId, r.data);
+          saved = r.data;
+        } else if (r.reason === 'gone') {
+          clearSession(shareId);
+          setScreen({ k: 'gone' });
+          return;
+        } else if (r.reason === 'invalid') {
+          clearSession(shareId);
+          saved = null;
+        }
+      }
       if (saved && name) {
         setScreen({ k: 'share', info: saved });
         return;

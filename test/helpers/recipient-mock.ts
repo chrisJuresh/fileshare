@@ -68,7 +68,7 @@ export interface RecipientMock {
   infoHash: string;
   files: MockFile[];
   /** `liveCloseCodes`: close code of every live socket that had said hello (1001 = page closed or reloaded). */
-  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; liveCloseCodes: number[]; unlockNames: unknown[] };
+  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; liveCloseCodes: number[]; unlockNames: unknown[]; nameSwaps: unknown[] };
   /** Makes the share gone and closes live sockets with 4404 (revocation mid-download). */
   revoke(): void;
   close(): Promise<void>;
@@ -138,7 +138,7 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   app.get('/s/:shareId', (_req, reply) => sendStatic(webRoot, 'index.html', reply, { 'Cache-Control': 'no-store' }));
 
   let revoked = false;
-  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], liveCloseCodes: [], unlockNames: [] };
+  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], liveCloseCodes: [], unlockNames: [], nameSwaps: [] };
   const isShare = (id: string): boolean => id === shareId && !revoked;
   const tokenOk = (t: string | undefined): boolean => t === token && !revoked;
 
@@ -161,6 +161,15 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
       stats.unlockFailures++;
       return reply.code(401).send({ error: 'bad_password' });
     }
+    return unlockBody;
+  });
+
+  // Token-for-name swap: the mock keeps its one token (a real server returns a recipient token).
+  app.post<{ Params: { id: string }; Body: { token?: unknown; name?: unknown } }>('/api/s/:id/name', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isShare(req.params.id)) return reply.code(404).send({ error: 'gone' });
+    if (typeof req.body?.token !== 'string' || !tokenOk(req.body.token)) return reply.code(401).send({ error: 'invalid' });
+    stats.nameSwaps.push(req.body?.name);
     return unlockBody;
   });
 

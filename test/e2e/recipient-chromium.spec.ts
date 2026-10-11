@@ -123,6 +123,7 @@ test.describe('P2P from the seeder', () => {
     await page.getByLabel('Your name (up to 24 characters)').fill('Synthetic Alex');
     await page.getByRole('button', { name: 'Change' }).click();
     await expect.poll(() => mock.stats.live.map((c) => c.nick)).toContain('Synthetic Alex');
+    await expect.poll(() => mock.stats.nameSwaps).toContain('Synthetic Alex'); // new torrent links for the new name
     await expect(page.locator('table.swarm tr.you')).toContainText('Synthetic Alex');
     expect(await page.evaluate(() => localStorage.getItem('fileshare.nick'))).toBe('Synthetic Alex');
   });
