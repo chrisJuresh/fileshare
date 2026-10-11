@@ -198,6 +198,31 @@ describe('live stats socket', () => {
     a.ws.close();
   });
 
+  it('a page that closes or reloads (1001) leaves at once, also from its tracker row; it can come back', async () => {
+    const { share, token } = await newShare();
+    const a = await connect(share.id);
+    a.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_A }));
+    const b = await connect(share.id);
+    b.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_B }));
+    // Its tracker socket is still winding down: the announce must not bring the row back.
+    p2p.stats.onAnnounce({ shareId: share.id, peerId: PEER_B, type: 'ws', event: 'update', left: 1, uploaded: 0, downloaded: 0 });
+    // The same person also seeds from a torrent app (its own peer id, named by their recipient token).
+    const app = 'cc'.repeat(20);
+    p2p.stats.onAnnounce({ shareId: share.id, peerId: app, type: 'http', event: 'start', left: 0, uploaded: 0, downloaded: 0, name: 'Synthetic Sam' });
+    await waitFor(() => a.last()?.peers.length === 4);
+    b.ws.close(1001);
+    await sleep(250); // < lingerMs
+    expect(a.last()!.peers.map((r) => r.kind)).toEqual(['server', 'browser', 'client']);
+    expect(a.last()!.peers.find((r) => r.kind === 'client')!.label).toBe('Synthetic Sam');
+    expect(a.last()!.totals.peers).toBe(3);
+    // The same peer id saying hello again (a page restored from the back/forward cache) is back.
+    const b2 = await connect(share.id);
+    b2.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_B }));
+    await waitFor(() => a.last()?.peers.length === 4);
+    b2.ws.close();
+    a.ws.close();
+  });
+
   it('closes 4401 when the password changes and 4404 when revoked', async () => {
     const { share, token } = await newShare();
     const a = await connect(share.id);

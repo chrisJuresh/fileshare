@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
-import type { ShareDto, StatsDto } from '../../src/types.ts';
+import type { ServerMsg, ShareDto, StatsDto } from '../../src/types.ts';
 import { admin, createShare, findIps, fmtMB, pub, SCRATCH, seedItem, setCap, sha256File, sleep, stack, stripConfigured, worstCapEnvelope, type RateSample } from '../helpers/stack.ts';
 import {
   closePeers,
@@ -116,6 +116,24 @@ test('3 browsers and a torrent client share one capped swarm; live tables; no IP
     const adminSwarms = live.messages().map((m) => m.shares[share.id]).filter(Boolean);
     expect(adminSwarms.some((w) => w!.peers.some((r) => r.kind === 'server') && w!.peers.filter((r) => r.kind === 'browser').length >= peers.length)).toBe(true);
     expect(adminSwarms.some((w) => w!.peers.some((r) => r.kind === 'client'))).toBe(true);
+
+    // A recipient reloading comes back with a new peer id. Its old row goes at once (the old page's
+    // live socket closes with 1001) instead of lingering 30 s next to the new one, WebRTC wire included.
+    const browsers = (m: ServerMsg) => m.peers.filter((r) => r.kind === 'browser');
+    const reloadedRow = (m: ServerMsg | undefined) => m && browsers(m).find((r) => r.label === 'Synthetic Peer 2');
+    const oldId = reloadedRow(swarmMessages(peers[0]!).at(-1))!.id;
+    const from = swarmMessages(peers[0]!).length;
+    const since = () => swarmMessages(peers[0]!).slice(from);
+    await peers[2]!.page.reload();
+    await expect(peers[2]!.page.getByText('You downloaded these files on an earlier visit.')).toBeVisible({ timeout: 30_000 });
+    // The new page joins (new row id) well inside the 30 s linger, and the table never shows both.
+    const newId = () => reloadedRow(since().at(-1))?.id;
+    await expect.poll(() => newId() !== undefined && newId() !== oldId, { timeout: 15_000 }).toBe(true);
+    await sleep(3000);
+    expect(Math.max(...since().map((m) => browsers(m).length))).toBe(peers.length);
+    expect(since().at(-1)!.peers.some((r) => r.id === oldId)).toBe(false);
+    // The torrent app (its own peer id) keeps its row through a browser leaving.
+    expect(since().every((m) => m.peers.some((r) => r.kind === 'client' && r.label === 'Synthetic Torrent'))).toBe(true);
 
     // No IP address in any live frame, admin frame, public API response or info-level app log line.
     const texts = [

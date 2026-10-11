@@ -91,6 +91,9 @@ class ShareSwarm {
   readonly announced = new Map<string, AnnouncedPeer>();
   /** Last row + time it was last current, for the 30 s linger. */
   readonly recent = new Map<string, { row: SwarmPeer; at: number }>();
+  /** Browsers whose page closed (live socket closed with 1001): no row, no linger, even while their
+   * WebRTC wire or tracker entry is still winding down. Cleared by a new hello from the same peer id. */
+  readonly departed = new Set<string>();
   /** Upload ledger and completions are kept until the share becomes inactive (not on idle), so a
    * peer that comes back after an idle gap is not counted twice. Both are bounded. */
   readonly lastUploaded = new Map<string, number>();
@@ -122,6 +125,7 @@ class ShareSwarm {
       this.browsers.size === 0 &&
       this.announced.size === 0 &&
       this.recent.size === 0 &&
+      this.departed.size === 0 &&
       p.webseed === 0 &&
       p.p2p === 0 &&
       p.peerBytes === 0 &&
@@ -208,6 +212,14 @@ export class SwarmStats {
     } catch (err) {
       this.log.warn({ err: (err as Error).message }, 'could not record completion');
     }
+  }
+
+  private depart(s: ShareSwarm, peerId: string): void {
+    s.browsers.delete(peerId);
+    s.recent.delete(peerId);
+    s.ids.delete(peerId);
+    if (!s.departed.has(peerId)) evictOldest(s.departed, MAX_PEERS_PER_SHARE);
+    s.departed.add(peerId);
   }
 
   onAnnounce(a: AnnounceInfo): void {
@@ -346,9 +358,11 @@ export class SwarmStats {
         uploaded: b.uploaded,
       });
     }
+    const wirePids = new Set<string>();
     for (const w of torrent?.wires ?? []) {
       const pid = w.peerId;
-      if (!pid || pid === spid || w.type === 'webSeed' || current.has(pid)) continue;
+      if (pid) wirePids.add(pid);
+      if (!pid || pid === spid || w.type === 'webSeed' || current.has(pid) || s.departed.has(pid)) continue;
       const kind = w.type === 'webrtc' ? 'browser' : 'client';
       const ann = s.announced.get(pid);
       current.set(pid, {
@@ -366,7 +380,7 @@ export class SwarmStats {
         s.announced.delete(pid);
         continue;
       }
-      if (pid === spid || current.has(pid)) continue;
+      if (pid === spid || current.has(pid) || s.departed.has(pid)) continue;
       const kind = a.type === 'ws' ? 'browser' : 'client';
       const progress = total > 0 && Number.isFinite(a.left) ? Math.min(1, Math.max(0, 1 - a.left / total)) : a.left === 0 ? 1 : 0;
       current.set(pid, { id: `p${s.n(pid)}`, label: label(pid, kind), kind, progress, down: 0, up: 0, uploaded: a.uploaded });
@@ -386,6 +400,7 @@ export class SwarmStats {
       }
     }
     for (const [pid, b] of s.browsers) if (!b.socket && !s.recent.has(pid)) s.browsers.delete(pid);
+    for (const pid of s.departed) if (!wirePids.has(pid) && !s.announced.has(pid)) s.departed.delete(pid);
 
     const server: SwarmPeer = {
       id: 'srv',
@@ -428,6 +443,7 @@ export class SwarmStats {
         s.browsers.clear();
         s.announced.clear();
         s.recent.clear();
+        s.departed.clear();
         s.lastUploaded.clear();
         s.completed.clear();
       } else {
@@ -508,12 +524,16 @@ export class SwarmStats {
     const helloTimer = setTimeout(() => sock.close(4401, 'hello timeout'), this.timings.helloTimeoutMs);
 
     sock.on('error', () => {});
-    sock.on('close', () => {
+    sock.on('close', (code: number) => {
       clearTimeout(helloTimer);
       if (!s) return;
       s.sockets.delete(sock);
       if (peer && peer.socket === sock) {
         peer.socket = undefined;
+        // 1001 "going away": the browser closed or reloaded the page, so the peer is gone for good
+        // (a reload comes back with a new peer id). Drop its row now; other closes (a network drop,
+        // which may reconnect) linger.
+        if (code === 1001) this.depart(s, peer.peerId);
         this.scheduleBroadcast(s.shareId);
       }
     });
@@ -547,6 +567,7 @@ export class SwarmStats {
         sock.fsPeerId = peerId;
         sock.fsTokenVersion = auth.share.token_version;
         s.sockets.add(sock);
+        s.departed.delete(peerId);
         const prev = s.browsers.get(peerId);
         if (prev?.socket && prev.socket !== sock) prev.socket.close(1000, 'replaced');
         peer = prev ?? { peerId, progress: 0, down: 0, up: 0, uploaded: 0, done: false };

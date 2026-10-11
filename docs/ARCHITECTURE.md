@@ -525,7 +525,11 @@ server → client (every ~1.5 s, and on change):
 * Browser rows without a nick are labelled "Friend N".
 * Torrent-client rows take progress from the seeder's `wire.peerPieces` bitfield when connected,
   otherwise from the tracker announce's `left`.
-* Peers that disconnect are removed after 30 s.
+* Peers that disconnect are removed after 30 s (so a network blip doesn't make them flicker). A
+  browser whose page was closed or reloaded is removed at once: its live socket closes with 1001
+  ("going away"), and its WebRTC wire and tracker rows are hidden while they wind down (a reload comes
+  back under a new peer id). The same peer id saying `hello` again clears that. A torrent app the
+  same person seeds from has its own peer id and keeps its row.
 * Accounting: `peer_bytes` counts the increase of each peer's reported cumulative `uploaded`, and a
   completion counts once per peer id. The per-peer ledger is kept while the share is active (also
   across idle periods) and dropped when it becomes inactive. A tracker `completed` event counts

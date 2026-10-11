@@ -77,7 +77,10 @@ test('per-file save via the service worker and a streamed zip of everything', as
   expect(storedZipHashes(zip)).toEqual(Object.fromEntries(mock.files.map((f) => [f.path, f.sha256])));
 
   // Reopened: seeding again from browser storage straight away, and Save still works.
+  const closesBefore = mock.stats.liveCloseCodes.length;
   await page.reload();
+  // The old page's live socket says it went away (1001), so the server drops its swarm row at once.
+  await expect.poll(() => mock.stats.liveCloseCodes.slice(closesBefore)).toEqual([1001]);
   await expect(page.getByText('You downloaded these files on an earlier visit.')).toBeVisible({ timeout: 30_000 });
   const again = await hookState(page);
   expect(again.done).toBe(true);

@@ -133,7 +133,10 @@ test.describe('P2P from the seeder', () => {
     await expect.poll(async () => (await hookState(page)).saved, { timeout: 60_000, intervals: [500] }).toBe(true);
 
     // Same tab (the unlock is kept in sessionStorage): straight back to seeding from the stored pieces.
+    const closesBefore = mock.stats.liveCloseCodes.length;
     await page.reload();
+    // The old page's live socket says it went away (1001), so the server drops its swarm row at once.
+    await expect.poll(() => mock.stats.liveCloseCodes.slice(closesBefore)).toEqual([1001]);
     await expect(page.getByText('You downloaded these files on an earlier visit.')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('heading', { name: 'All done' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Choose folder and download' })).toHaveCount(0);

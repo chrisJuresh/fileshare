@@ -67,7 +67,8 @@ export interface RecipientMock {
   token: string;
   infoHash: string;
   files: MockFile[];
-  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; unlockNames: unknown[] };
+  /** `liveCloseCodes`: close code of every live socket that had said hello (1001 = page closed or reloaded). */
+  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; liveCloseCodes: number[]; unlockNames: unknown[] };
   /** Makes the share gone and closes live sockets with 4404 (revocation mid-download). */
   revoke(): void;
   close(): Promise<void>;
@@ -137,7 +138,7 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   app.get('/s/:shareId', (_req, reply) => sendStatic(webRoot, 'index.html', reply, { 'Cache-Control': 'no-store' }));
 
   let revoked = false;
-  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], unlockNames: [] };
+  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], liveCloseCodes: [], unlockNames: [] };
   const isShare = (id: string): boolean => id === shareId && !revoked;
   const tokenOk = (t: string | undefined): boolean => t === token && !revoked;
 
@@ -302,11 +303,14 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
       if (msg.t === 'stats') me.stats = msg;
       else if (msg.t === 'nick') me.nick = String(msg.nick).slice(0, 24);
     });
-    socket.on('close', () => {
+    socket.on('close', (code: number) => {
       clearTimeout(helloTimer);
       if (timer) clearInterval(timer);
       sockets.delete(socket);
-      if (me) stats.live = stats.live.filter((c) => c !== me);
+      if (me) {
+        stats.live = stats.live.filter((c) => c !== me);
+        stats.liveCloseCodes.push(code);
+      }
     });
   });
 
