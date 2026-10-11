@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { UnlockResponse } from '../../src/types.ts';
 import { cleanNick, clearSession, getShareStatus, loadNick, loadSession, saveNick, saveSession, shareIdFromLocation, unlock } from './api.ts';
+import { Logo } from './icons.tsx';
 import { ShareView } from './ShareView.tsx';
 
 type Screen =
@@ -60,89 +61,86 @@ export function App() {
   }, [screen]);
 
   return (
-    <main class="page">
-      {screen.k === 'loading' && <Loading />}
-      {screen.k === 'gone' && <Gone />}
-      {screen.k === 'error' && <ErrorScreen message={screen.message} onRetry={() => void boot()} />}
-      {screen.k === 'gate' && shareId && (
-        <Gate
-          shareId={shareId}
-          passwordRequired={screen.passwordRequired}
-          notice={screen.notice}
-          onUnlocked={(info) => {
-            saveSession(shareId, info);
-            setScreen({ k: 'share', info });
-          }}
-          onGone={() => setScreen({ k: 'gone' })}
-        />
-      )}
-      {screen.k === 'share' && shareId && (
-        <ShareView
-          key={screen.info.token}
-          shareId={shareId}
-          info={screen.info}
-          onRevoked={(hadStarted) => {
-            clearSession(shareId);
-            setScreen({ k: 'revoked', hadStarted });
-          }}
-          onAccessExpired={() => {
-            clearSession(shareId);
-            setScreen({ k: 'gate', passwordRequired: true, notice: 'Your access to this link has changed. Please enter the password again.' });
-          }}
-        />
-      )}
-      {screen.k === 'revoked' && <Revoked hadStarted={screen.hadStarted} />}
-    </main>
-  );
-}
-
-function Brand() {
-  return (
-    <p class="brand" aria-hidden="true">
-      fileshare
-    </p>
+    <>
+      <header class="topbar">
+        <span class="wordmark" aria-hidden="true">
+          <Logo />
+          fileshare
+        </span>
+      </header>
+      <main class="page">
+        {screen.k === 'loading' && <Loading />}
+        {screen.k === 'gone' && <Gone />}
+        {screen.k === 'error' && <ErrorScreen message={screen.message} onRetry={() => void boot()} />}
+        {screen.k === 'gate' && shareId && (
+          <Gate
+            shareId={shareId}
+            passwordRequired={screen.passwordRequired}
+            notice={screen.notice}
+            onUnlocked={(info) => {
+              saveSession(shareId, info);
+              setScreen({ k: 'share', info });
+            }}
+            onGone={() => setScreen({ k: 'gone' })}
+          />
+        )}
+        {screen.k === 'share' && shareId && (
+          <ShareView
+            key={screen.info.token}
+            shareId={shareId}
+            info={screen.info}
+            onRevoked={(hadStarted) => {
+              clearSession(shareId);
+              setScreen({ k: 'revoked', hadStarted });
+            }}
+            onAccessExpired={() => {
+              clearSession(shareId);
+              setScreen({ k: 'gate', passwordRequired: true, notice: 'Your access to this link has changed. Please enter the password again.' });
+            }}
+          />
+        )}
+        {screen.k === 'revoked' && <Revoked hadStarted={screen.hadStarted} />}
+      </main>
+    </>
   );
 }
 
 function Loading() {
   return (
-    <section class="card center" aria-busy="true">
-      <Brand />
-      <p role="status">Loading…</p>
+    <section class="screen" aria-busy="true">
+      <p class="muted" role="status">
+        Loading…
+      </p>
     </section>
   );
 }
 
 function Gone() {
   return (
-    <section class="card center">
-      <Brand />
+    <section class="screen">
       <h1>This link isn't available</h1>
-      <p class="muted">If you think this is a mistake, ask the person who sent it to you.</p>
+      <p class="muted">If you think this is a mistake, ask the person who sent it.</p>
     </section>
   );
 }
 
 function Revoked({ hadStarted }: { hadStarted: boolean }) {
   return (
-    <section class="card center" role="alert">
-      <Brand />
+    <section class="screen" role="alert">
       <h1>This link isn't available any more</h1>
-      <p>
-        The person who shared it has turned it off{hadStarted ? ', so the download has stopped' : ''}.
-        {hadStarted ? ' Files that had finished saving are kept; anything unfinished was not saved.' : ''}
+      <p class="muted">
+        The sender turned it off{hadStarted ? ', so the download has stopped' : ''}.
+        {hadStarted ? ' Files that finished saving are kept.' : ''} Ask them for a new link if you still need the files.
       </p>
-      <p class="muted">If you still need the files, ask them for a new link.</p>
     </section>
   );
 }
 
 function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <section class="card center" role="alert">
-      <Brand />
+    <section class="screen" role="alert">
       <h1>Something went wrong</h1>
-      <p>{message}</p>
+      <p class="muted">{message}</p>
       <button type="button" class="btn primary" onClick={onRetry}>
         Try again
       </button>
@@ -205,35 +203,33 @@ function Gate(props: {
   };
 
   return (
-    <section class="card narrow">
-      <Brand />
+    <section class="screen gate">
       <h1>{props.passwordRequired ? 'Enter your name and the password' : "What's your name?"}</h1>
-      <p class="muted">
-        Someone shared files with you.{props.passwordRequired ? ' The link is protected with a password.' : ''}
-      </p>
       {props.notice && (
         <p class="notice" role="status">
           {props.notice}
         </p>
       )}
       <form onSubmit={(e) => void submit(e)} class="stack">
-        <label for="name">Your name</label>
-        <input
-          id="name"
-          type="text"
-          autocomplete="name"
-          value={name}
-          onInput={(e) => setName((e.target as HTMLInputElement).value.slice(0, 24))}
-          aria-describedby="name-help"
-          maxLength={24}
-          required
-          autofocus={!name}
-        />
-        <p id="name-help" class="muted small">
-          Shown to the person who shared this link and to others downloading it.
-        </p>
+        <div class="field">
+          <label for="name">Your name</label>
+          <input
+            id="name"
+            type="text"
+            autocomplete="name"
+            value={name}
+            onInput={(e) => setName((e.target as HTMLInputElement).value.slice(0, 24))}
+            aria-describedby="name-help"
+            maxLength={24}
+            required
+            autofocus={!name}
+          />
+          <p id="name-help" class="hint">
+            Visible to the sender and anyone else downloading.
+          </p>
+        </div>
         {props.passwordRequired && (
-          <>
+          <div class="field">
             <label for="pw">Password</label>
             <input
               id="pw"
@@ -247,7 +243,7 @@ function Gate(props: {
               required
               autofocus={!!name}
             />
-          </>
+          </div>
         )}
         {error && (
           <p id="pw-err" class="error" role="alert">
@@ -255,10 +251,11 @@ function Gate(props: {
             {waitLeft > 0 ? ` Try again in ${waitLeft} s.` : ''}
           </p>
         )}
-        <button type="submit" class="btn primary" disabled={busy || waitLeft > 0 || !ready}>
+        <button type="submit" class="btn primary block" disabled={busy || waitLeft > 0 || !ready}>
           {busy ? (props.passwordRequired ? 'Checking…' : 'Opening…') : props.passwordRequired ? 'Open' : 'Continue'}
         </button>
       </form>
     </section>
   );
 }
+

@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks';
 import type { FileEntry } from '../../src/types.ts';
 import type { FileProgress } from './engine.ts';
 import { formatBytes, formatPercent } from './format.ts';
+import { ChevronIcon, FileIcon, FolderIcon } from './icons.tsx';
 import type { FileSaveState } from './save.ts';
 import { type TreeNode, checkState, countFiles } from './tree.ts';
 
@@ -68,6 +69,7 @@ function Node(p: NodeProps) {
   );
 
   if (!isFile) {
+    const n = countFiles(node);
     return (
       <li class="node folder">
         <div class="row">
@@ -78,16 +80,18 @@ function Node(p: NodeProps) {
             aria-label={`${open ? 'Collapse' : 'Expand'} ${node.name}`}
             onClick={() => p.toggleCollapse(node.path)}
           >
-            <span class={open ? 'chev open' : 'chev'} aria-hidden="true" />
+            <ChevronIcon open={open} />
           </button>
           <label class="name">
             {checkbox}
-            <span class="icon folder-icon" aria-hidden="true" />
+            <FolderIcon />
             <span class="label">{node.name}</span>
+            <span class="count">
+              {n} {n === 1 ? 'file' : 'files'}
+            </span>
           </label>
-          <span class="meta">
-            {countFiles(node)} {countFiles(node) === 1 ? 'file' : 'files'} · {formatBytes(node.size)}
-          </span>
+          <span class="size">{formatBytes(node.size)}</span>
+          {p.progress && <span class="file-status" aria-hidden="true" />}
         </div>
         {open && (
           <ul class="children">
@@ -101,37 +105,48 @@ function Node(p: NodeProps) {
   }
 
   const idx = node.fileIndex as number;
-  const prog = p.progress?.[idx];
   const isSelected = p.selected.has(idx);
-  const save = p.saveStates[idx];
-  const url = prog?.done && isSelected ? p.saveUrl(idx) : null;
-  const fraction = node.size > 0 ? (prog?.downloaded ?? 0) / node.size : prog?.done ? 1 : 0;
 
   return (
     <li class={isSelected ? 'node file' : 'node file unselected'}>
       <div class="row">
-        <span class="disclosure-spacer" aria-hidden="true" />
+        <span class="disclosure" aria-hidden="true" />
         <label class="name">
           {checkbox}
-          <span class="icon file-icon" aria-hidden="true" />
+          <FileIcon />
           <span class="label">{node.name}</span>
         </label>
-        <span class="meta">{formatBytes(node.size)}</span>
-        {p.progress && isSelected && (
-          <span class="file-status">
-            <progress class="bar small" max={1} value={prog?.done ? 1 : fraction} aria-label={`${node.path} progress`} />
-            <span class="pct">{prog?.done ? 'Done' : formatPercent(fraction)}</span>
-            {save === 'writing' && <span class="tag">Saving…</span>}
-            {save === 'saved' && <span class="tag ok">Saved</span>}
-            {save === 'error' && <span class="tag bad">Couldn't save</span>}
-            {url && (
-              <a class="btn small" href={url} download={node.name} aria-label={`Save ${node.path}`}>
-                Save
-              </a>
-            )}
-          </span>
-        )}
+        <span class="size">{formatBytes(node.size)}</span>
+        {p.progress && isSelected && <FileStatus {...p} idx={idx} />}
       </div>
     </li>
   );
+}
+
+/** One status per file: progress while downloading, then the save state or a Save link. */
+function FileStatus(p: NodeProps & { idx: number }) {
+  const prog = p.progress?.[p.idx];
+  const save = p.saveStates[p.idx];
+  const url = prog?.done ? p.saveUrl(p.idx) : null;
+  const fraction = p.node.size > 0 ? (prog?.downloaded ?? 0) / p.node.size : prog?.done ? 1 : 0;
+
+  let content;
+  if (save === 'error') content = <span class="tag bad">Couldn't save</span>;
+  else if (save === 'saved') content = <span class="tag ok">Saved</span>;
+  else if (url)
+    content = (
+      <a class="btn small" href={url} download={p.node.name} aria-label={`Save ${p.node.path}`}>
+        Save
+      </a>
+    );
+  else if (!prog?.done)
+    content = (
+      <>
+        <progress class="bar small" max={1} value={fraction} aria-label={`${p.node.path} progress`} />
+        <span class="pct">{formatPercent(fraction)}</span>
+      </>
+    );
+  else if (save === 'writing') content = <span class="tag">Saving…</span>;
+  else content = <span class="tag">Done</span>;
+  return <span class="file-status">{content}</span>;
 }

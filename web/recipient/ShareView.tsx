@@ -25,7 +25,7 @@ import {
   saveToDirectory,
 } from './save.ts';
 import { SwarmTable } from './SwarmTable.tsx';
-import { type TreeNode, buildTree, toggleNode } from './tree.ts';
+import { type TreeNode, buildTree, checkState, toggleNode } from './tree.ts';
 
 interface Props {
   shareId: string;
@@ -336,50 +336,46 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
 
   const fileCount = info.files.length;
   const done = phase === 'complete';
+  const allState = checkState(root, selected);
 
   return (
     <div class="share">
-      <header class="card hero">
-        <p class="brand" aria-hidden="true">
-          fileshare
-        </p>
+      <header class="share-head">
         <h1 class="item-name">{info.name}</h1>
         <p class="muted">
           {fileCount} {fileCount === 1 ? 'file' : 'files'} · {formatBytes(info.totalBytes)}
-          {info.expiresAt !== null && ` · link works until ${new Date(info.expiresAt).toLocaleString()}`}
+          {info.expiresAt !== null &&
+            ` · Expires ${new Date(info.expiresAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`}
         </p>
-        {phone && (
-          <p class="notice">
-            You're on a phone or tablet. Downloading works, but it will be slower and won't help others much.
-          </p>
-        )}
-        {!webrtc && (
-          <p class="notice">
-            Your browser can't connect directly to other people, so this download comes straight from the server. It
-            works, but it's slower.
-          </p>
-        )}
-        {initError && (
-          <p class="error" role="alert">
-            {initError}
-          </p>
-        )}
       </header>
 
-      <section class="card" aria-labelledby="files-h">
-        <div class="card-head">
-          <h2 id="files-h">Choose files</h2>
-          {!started && fileCount > 1 && (
-            <div class="actions">
-              <button type="button" class="btn link" onClick={() => setSelected(new Set(info.files.map((_, i) => i)))}>
-                Select all
-              </button>
-              <button type="button" class="btn link" onClick={() => setSelected(new Set())}>
-                Select none
-              </button>
-            </div>
-          )}
-        </div>
+      {phone && <p class="notice">On a phone, downloads are slower and won't help others much.</p>}
+      {!webrtc && (
+        <p class="notice">Your browser can't connect to other people, so this downloads from the server. It works, but slower.</p>
+      )}
+      {initError && (
+        <p class="error" role="alert">
+          {initError}
+        </p>
+      )}
+
+      <section class="panel" aria-label="Files">
+        {fileCount > 1 && (
+          <div class={started ? 'panel-head started' : 'panel-head'}>
+            <label class="name">
+              <input
+                type="checkbox"
+                class="check"
+                checked={allState === 'all'}
+                indeterminate={allState === 'some'}
+                disabled={started}
+                onChange={() => onToggle(root)}
+              />
+              <span>Name</span>
+            </label>
+            <span>Size</span>
+          </div>
+        )}
         <FileTree
           root={root}
           files={info.files}
@@ -390,122 +386,99 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           saveStates={saveStates}
           saveUrl={saveUrl}
         />
-        <p class="muted selection" aria-live="polite">
-          {selected.size} of {fileCount} selected · {formatBytes(selectedBytes)}
-        </p>
 
-        {!started && (
-          <div class="start">
-            {saveMode === 'directory' && (
-              <>
-                <button
-                  type="button"
-                  class="btn primary big"
-                  disabled={selected.size === 0 || !snap}
-                  onClick={() => void startDirectory()}
-                >
+        <div class="panel-foot">
+          {!started && (
+            <div class="foot-row">
+              <p class="muted" aria-live="polite">
+                {selected.size} of {fileCount} selected · {formatBytes(selectedBytes)}
+              </p>
+              {saveMode === 'directory' && (
+                <button type="button" class="btn primary" disabled={selected.size === 0 || !snap} onClick={() => void startDirectory()}>
                   Choose folder and download
                 </button>
-                <p class="muted small">You'll pick a folder; files are saved there as they arrive.</p>
-              </>
-            )}
-            {saveMode === 'serviceworker' && (
-              <>
+              )}
+              {saveMode === 'serviceworker' && (
                 <button
                   type="button"
-                  class="btn primary big"
+                  class="btn primary"
                   disabled={selected.size === 0 || !snap}
                   onClick={() => void startServiceWorker(false)}
                 >
                   Start download
                 </button>
-                <p class="muted small">Files download into your browser first; then you save them with one click.</p>
-              </>
-            )}
-            {saveMode === 'none' && (
-              <p class="notice">This browser can't save large downloads from this page. Use the direct links below.</p>
-            )}
-          </div>
-        )}
-
-        {storage && (
-          <StorageWarning
-            problem={storage}
-            info={info}
-            selected={selectedList()}
-            canForce={saveMode === 'serviceworker' && !started}
-            onForce={() => void startServiceWorker(true)}
-          />
-        )}
-        {problem && (
-          <p class="error" role="alert">
-            {problem}
-          </p>
-        )}
-        {(saveMode === 'none' || (problem && saveMode === 'serviceworker' && !started)) && (
-          <DirectLinks info={info} selected={selectedList()} />
-        )}
-      </section>
-
-      {started && snap && (
-        <section class="card" aria-labelledby="progress-h">
-          <h2 id="progress-h">
-            {done
-              ? 'All done'
-              : snap.phase === 'error'
-                ? 'Download problem'
-                : snap.resumed
-                  ? 'Checking the files you downloaded before'
-                  : 'Downloading'}
-          </h2>
-          <progress class="bar big" max={1} value={snap.progress} aria-label="Overall progress" />
-          <p class="stats" aria-live="polite">
-            <strong>{formatPercent(snap.progress)}</strong>
-            {' · '}
-            {formatBytes(snap.doneBytes)} of {formatBytes(snap.selectedBytes)}
-            {!done && snap.phase === 'downloading' && (
-              <>
-                {' · '}
-                {formatSpeed(snap.down)} · {formatEta(snap.eta)} left
-              </>
-            )}
-          </p>
-          <p class="muted small">
-            Connected to {snap.numPeers} {snap.numPeers === 1 ? 'peer' : 'peers'}
-            {snap.webseedActive ? ' · getting extra help straight from the server' : ''}
-            {snap.phase === 'starting' ? ' · getting ready…' : ''}
-          </p>
-          {snap.error && (
-            <p class="error" role="alert">
-              {snap.error}
-            </p>
-          )}
-          {done && snap.resumed && <p class="ok-text">You downloaded these files on an earlier visit.</p>}
-          {done && saveMode === 'directory' && !snap.resumed && (
-            <p class="ok-text">{allSaved ? 'Everything is saved in the folder you chose.' : saving ? 'Finishing saving…' : ''}</p>
-          )}
-          {done && saveMode === 'serviceworker' && (
-            <div class="save-all">
-              <p>Your files are ready. Use the Save buttons above, or get everything at once:</p>
-              <button type="button" class="btn primary" disabled={zipBusy} onClick={() => void downloadAll()}>
-                {zipBusy ? 'Preparing zip…' : 'Download all (.zip)'}
-              </button>
+              )}
             </div>
           )}
-          <p class="helping">
-            {done
-              ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open to help your friends download faster. If you close it, open this link again later to carry on sharing.`
-              : 'Keep this tab open to help your friends download faster.'}
-          </p>
-        </section>
-      )}
+          {!started && saveMode === 'none' && (
+            <p class="notice">This browser can't save large downloads from this page. Use the direct links below.</p>
+          )}
 
-      <SwarmTable swarm={swarm} connected={liveConnected} />
+          {started && snap && (
+            <div class="progress" aria-labelledby="progress-h">
+              <div class="progress-head">
+                <h2 id="progress-h">
+                  {done ? 'All done' : snap.phase === 'error' ? 'Download problem' : snap.resumed ? 'Checking your earlier download' : 'Downloading'}
+                </h2>
+                <span class="pct-big">{formatPercent(snap.progress)}</span>
+              </div>
+              <progress class="bar" max={1} value={snap.progress} aria-label="Overall progress" />
+              <p class="stats muted" aria-live="polite">
+                {formatBytes(snap.doneBytes)} of {formatBytes(snap.selectedBytes)}
+                {!done && snap.phase === 'downloading' && ` · ${formatSpeed(snap.down)}`}
+                {!done && snap.phase === 'downloading' && snap.eta !== null && Number.isFinite(snap.eta) && snap.eta >= 0 && ` ·${formatEta(snap.eta)} left`}
+                {` · ${snap.numPeers} ${snap.numPeers === 1 ? 'peer' : 'peers'}`}
+                {snap.webseedActive ? ' + server' : ''}
+                {snap.phase === 'starting' ? ' · getting ready…' : ''}
+              </p>
+              {snap.error && (
+                <p class="error" role="alert">
+                  {snap.error}
+                </p>
+              )}
+              {done && snap.resumed && <p class="ok-text">You downloaded these files on an earlier visit.</p>}
+              {done && saveMode === 'directory' && !snap.resumed && (allSaved || saving) && (
+                <p class="ok-text">{allSaved ? 'Everything is saved in the folder you chose.' : 'Finishing saving…'}</p>
+              )}
+              {done && saveMode === 'serviceworker' && (
+                <div class="foot-row">
+                  <p>Save files one by one, or everything at once.</p>
+                  <button type="button" class="btn primary" disabled={zipBusy} onClick={() => void downloadAll()}>
+                    {zipBusy ? 'Preparing zip…' : 'Download all (.zip)'}
+                  </button>
+                </div>
+              )}
+              <p class="hint">
+                {done
+                  ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open, or reopen the link later, to help them finish faster.`
+                  : 'Keep this tab open to help others download faster.'}
+              </p>
+            </div>
+          )}
 
-      <section class="card" aria-labelledby="nick-h">
-        <h2 id="nick-h">Your name</h2>
+          {storage && (
+            <StorageWarning
+              problem={storage}
+              info={info}
+              selected={selectedList()}
+              canForce={saveMode === 'serviceworker' && !started}
+              onForce={() => void startServiceWorker(true)}
+            />
+          )}
+          {problem && (
+            <p class="error" role="alert">
+              {problem}
+            </p>
+          )}
+          {(saveMode === 'none' || (problem && saveMode === 'serviceworker' && !started)) && (
+            <DirectLinks info={info} selected={selectedList()} />
+          )}
+        </div>
+      </section>
+
+      <SwarmTable swarm={swarm} connected={liveConnected}>
         <form
-          class="row-form"
+          class="panel-foot nick"
           onSubmit={(e) => {
             e.preventDefault();
             commitNick();
@@ -514,6 +487,9 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           <label for="nick" class="visually-hidden">
             Your name (up to 24 characters)
           </label>
+          <span class="muted" aria-hidden="true">
+            Your name
+          </span>
           <input
             id="nick"
             type="text"
@@ -528,28 +504,25 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
             Change
           </button>
         </form>
-        <p class="muted small">Shown to the person who shared this link and to others downloading it.</p>
-      </section>
+      </SwarmTable>
 
-      <details class="card torrent-apps">
+      <details class="panel more">
         <summary>Use a torrent app instead</summary>
-        <p>
-          If you have a torrent app (like qBittorrent or Transmission), you can download with it instead. Torrent apps
-          keep going when this tab is closed and are good for very large downloads. When it has finished, leave it
-          sharing (seeding) in the app for a while so others get it faster.
-        </p>
-        <p class="muted small">
-          The .torrent file and magnet link below are yours: they show your name to the person who shared this link,
-          so please don't pass them on. Send others the page link instead.
-        </p>
-        <div class="actions">
-          <a class="btn" href={info.torrentUrl} download={`${info.name}.torrent`}>
-            Download .torrent file
-          </a>
-          <a class="btn" href={info.magnet}>
-            Open magnet link
-          </a>
-          <CopyButton text={info.magnet} label="Copy magnet link" />
+        <div class="more-body">
+          <p>
+            Apps like qBittorrent or Transmission keep going after this tab is closed, which suits very large downloads.
+            Leave it seeding afterwards so others get the files faster.
+          </p>
+          <p class="hint">These links carry your name, so don't pass them on. Send others the page link instead.</p>
+          <div class="actions">
+            <a class="btn" href={info.torrentUrl} download={`${info.name}.torrent`}>
+              Download .torrent file
+            </a>
+            <a class="btn" href={info.magnet}>
+              Open magnet link
+            </a>
+            <CopyButton text={info.magnet} label="Copy magnet link" />
+          </div>
         </div>
       </details>
     </div>
@@ -589,11 +562,11 @@ function StorageWarning(props: {
     <div class="warning" role="alert">
       <h3>Not enough browser storage</h3>
       <p>
-        This download needs about {formatBytes(problem.needed)} of space inside your browser, but it only lets this page
-        use {formatBytes(problem.available)} right now.
-        {!problem.persisted && ' Allowing this site to "store data persistently" (if your browser asks) gives it more room.'}
+        This download needs about {formatBytes(problem.needed)} inside your browser, but only{' '}
+        {formatBytes(problem.available)} is available.
+        {!problem.persisted && ' If your browser asks to let this site store data persistently, allowing it gives more room.'}
+        {' '}Free up disk space and reload, try anyway, or use a direct download.
       </p>
-      <p>You can free up disk space and reload, try anyway, or use the direct downloads below.</p>
       {props.canForce && (
         <button type="button" class="btn" onClick={props.onForce}>
           Try anyway
@@ -608,11 +581,8 @@ function DirectLinks({ info, selected }: { info: UnlockResponse; selected: numbe
   if (selected.length === 0) return null;
   return (
     <details class="direct">
-      <summary>Direct download from the server (last resort)</summary>
-      <p class="muted small">
-        These links download straight from the server without sharing with others. They're slower, and they make the
-        download slower for everyone else too, so please only use them if nothing else works.
-      </p>
+      <summary>Direct download from the server</summary>
+      <p class="hint">Slower, and it slows everyone else down too. Use only if nothing else works.</p>
       <ul>
         {selected.map((i) => {
           const f = info.files[i];
@@ -622,8 +592,8 @@ function DirectLinks({ info, selected }: { info: UnlockResponse; selected: numbe
             <li key={i}>
               <a href={directUrl(info, i)} download={name}>
                 {f.path}
-              </a>{' '}
-              <span class="muted">({formatBytes(f.length)})</span>
+              </a>
+              <span class="size">{formatBytes(f.length)}</span>
             </li>
           );
         })}
