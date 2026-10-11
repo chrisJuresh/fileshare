@@ -33,6 +33,7 @@ const expiresAt = z
   .refine((v) => v <= Date.now() + TEN_YEARS_MS, 'expiresAt must be at most 10 years ahead');
 
 const RenameBody = z.object({ name: z.string().min(1).max(1000) }).strict();
+const AddFilesBody = z.object({ batchId: z.string().regex(/^[a-z2-7]{26}$/) }).strict();
 const EmptyBody = z.object({}).strict().optional();
 const CreateShareBody = z
   .object({ itemId: z.string().min(1).max(64), password: password.optional(), expiresAt: expiresAt.optional() })
@@ -111,6 +112,15 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     if (!item) throw new HttpError(404, 'not_found');
     if (item.status !== 'error') throw new HttpError(409, 'not_in_error', 'only items in error can be retried');
     await ingest.retry(id);
+    return { ok: true };
+  });
+
+  // Append the files of an open upload round to a ready folder item; its shares keep their links.
+  api.post('/items/:id/add-files', async (req) => {
+    const { id } = parse(idParam, req.params);
+    const body = parse(AddFilesBody, req.body);
+    if (!getItemRow(db, id)) throw new HttpError(404, 'not_found');
+    await ingest.addFiles(id, body.batchId);
     return { ok: true };
   });
 

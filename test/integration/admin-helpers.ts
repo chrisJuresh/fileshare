@@ -95,6 +95,9 @@ export class FakeIngest implements IngestService {
     await this.p2p.revokeAllForItem(itemId);
     this.ctx.db.prepare(`UPDATE items SET status = 'deleted', deleted_at = ? WHERE id = ?`).run(Date.now(), itemId);
   }
+  async addFiles(itemId: string, batchId: string): Promise<void> {
+    this.calls.push({ method: 'addFiles', args: [itemId, batchId] });
+  }
   async registerAdminRoutes(app: FastifyInstance): Promise<void> {
     app.addContentTypeParser('application/offset+octet-stream', (_req, _payload, done) => done(null));
     app.post('/api/admin/uploads/batches', async () => ({ id: 'batch-synthetic' }));
@@ -161,6 +164,9 @@ export class FakeP2P implements P2PService {
     this.ctx.db.prepare('UPDATE shares SET revoked_at = ? WHERE item_id = ? AND revoked_at IS NULL').run(Date.now(), itemId);
   }
   async repointItem(): Promise<void> {}
+  async refreshItemShares(itemId: string): Promise<void> {
+    this.calls.push({ method: 'refreshItemShares', args: [itemId] });
+  }
   resetUnlockLimits(id: string): void {
     this.calls.push({ method: 'resetUnlockLimits', args: [id] });
   }

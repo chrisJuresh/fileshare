@@ -136,6 +136,16 @@ describe('items', () => {
     expect(h.ingest.calls).toEqual([{ method: 'retry', args: [failed] }]);
   });
 
+  it('adds files from an upload round (validates the round id)', async () => {
+    const a = insertItem(h.ctx, { status: 'ready' });
+    const batchId = 'a'.repeat(26);
+    expect((await call('POST', `/api/admin/items/${a}/add-files`, { batchId: 'nope' })).statusCode).toBe(400);
+    expect((await call('POST', `/api/admin/items/${a}/add-files`, { batchId, extra: 1 })).statusCode).toBe(400);
+    expect((await call('POST', '/api/admin/items/unknown/add-files', { batchId })).statusCode).toBe(404);
+    expect((await call('POST', `/api/admin/items/${a}/add-files`, { batchId })).statusCode).toBe(200);
+    expect(h.ingest.calls).toEqual([{ method: 'addFiles', args: [a, batchId] }]);
+  });
+
   it('lists files of single- and multi-file items', async () => {
     const single = insertItem(h.ctx, {
       kind: 'file',

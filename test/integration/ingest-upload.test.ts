@@ -8,6 +8,8 @@ import * as tus from 'tus-js-client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ItemRow } from '../../src/db/index.js';
 import { createIngest, type IngestService } from '../../src/ingest/index.js';
+import { bdecode, planAppend } from '../../src/ingest/torrent.js';
+import { parseInfo } from '../../src/p2p/metainfo.js';
 import { makeTestEnv, runFakeBackup, startFakeSyncthing, waitFor, type FakeSyncthing, type TestEnv } from '../helpers/ingest-fakes.js';
 
 const TUS = '/api/admin/uploads/tus/';
@@ -33,12 +35,15 @@ describe('web upload (tus)', () => {
   let ingest: IngestService;
   let app: FastifyInstance;
   let base: string;
+  let refreshed: string[];
 
   beforeEach(async () => {
     const apiKey = randomBytes(24).toString('hex');
     fake = await startFakeSyncthing(apiKey);
     env = makeTestEnv({ SYNCTHING_API_URL: fake.url }, apiKey);
-    ingest = createIngest(env.ctx, { p2p: { revokeAllForItem: async () => undefined, repointItem: async () => undefined } }, { tickMs: 150, snapshotPollMs: 150, eventPollTimeoutS: 1 });
+    refreshed = [];
+    const p2p = { revokeAllForItem: async () => undefined, repointItem: async () => undefined, refreshItemShares: async (id: string) => void refreshed.push(id) };
+    ingest = createIngest(env.ctx, { p2p }, { tickMs: 150, snapshotPollMs: 150, eventPollTimeoutS: 1 });
     app = Fastify({ bodyLimit: 1024 * 1024 });
     await ingest.registerAdminRoutes(app);
     await ingest.start();
@@ -202,5 +207,70 @@ describe('web upload (tus)', () => {
     const batchId = await newBatch();
     expect((await fetch(`${base}/api/admin/uploads/batches/${batchId}/complete`, { method: 'POST' })).status).toBe(400);
     expect((await fetch(`${base}/api/admin/uploads/batches/${'b'.repeat(26)}/complete`, { method: 'POST' })).status).toBe(404);
+  });
+
+  it('adds files to a ready folder item: appended after a pad, old pieces kept, links refreshed', async () => {
+    const MiB = 1024 * 1024;
+    const getItem = (id: string) => env.ctx.db.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow;
+    const x = randomBytes(MiB + 3);
+    const y = randomBytes(5000);
+    const b1 = await newBatch();
+    await upload(base, x, { batchId: b1, relativePath: 'Set/x.bin', filename: 'x.bin' }, MiB);
+    await upload(base, y, { batchId: b1, relativePath: 'Set/y.bin', filename: 'y.bin' });
+    await upload(base, y, { batchId: b1, relativePath: 'one.bin', filename: 'one.bin' });
+    const { itemIds } = (await (await fetch(`${base}/api/admin/uploads/batches/${b1}/complete`, { method: 'POST' })).json()) as { itemIds: string[] };
+    const [one, set] = itemIds.map(getItem).sort((a, b) => a.name.localeCompare(b.name)) as [ItemRow, ItemRow];
+    expect([one.name, set.name]).toEqual(['one.bin', 'Set']);
+    await waitFor(() => getItem(set.id).status === 'snapshotting' && getItem(one.id).status === 'snapshotting');
+
+    const b2 = await newBatch();
+    const z = randomBytes(300 * 1024);
+    const w = randomBytes(10);
+    await upload(base, z, { batchId: b2, relativePath: 'a-first.bin', filename: 'a-first.bin' });
+    await upload(base, w, { batchId: b2, relativePath: 'more/w.bin', filename: 'w.bin' });
+    // only once ready, only folders, only open rounds
+    await expect(ingest.addFiles(set.id, b2)).rejects.toMatchObject({ statusCode: 409 });
+    runFakeBackup(env.ctx.db, env.ctx.config.paths.library, 'ok');
+    await waitFor(() => getItem(set.id).status === 'ready' && getItem(one.id).status === 'ready');
+    await expect(ingest.addFiles(one.id, b2)).rejects.toMatchObject({ statusCode: 409, message: /folder/ });
+    await expect(ingest.addFiles(set.id, b1)).rejects.toMatchObject({ statusCode: 409 });
+    await expect(ingest.addFiles(set.id, 'c'.repeat(26))).rejects.toMatchObject({ statusCode: 404 });
+    const empty = await newBatch();
+    await expect(ingest.addFiles(set.id, empty)).rejects.toMatchObject({ statusCode: 400 });
+    // a name that already exists in the item is refused, and the round stays open
+    const clash = await newBatch();
+    await upload(base, w, { batchId: clash, relativePath: 'y.bin', filename: 'y.bin' });
+    await expect(ingest.addFiles(set.id, clash)).rejects.toMatchObject({ statusCode: 409, message: /already exists/ });
+    const clash2 = await newBatch();
+    await upload(base, w, { batchId: clash2, relativePath: 'x.bin/inner.bin', filename: 'inner.bin' });
+    await expect(ingest.addFiles(set.id, clash2)).rejects.toMatchObject({ statusCode: 409 });
+    expect(getItem(set.id).status).toBe('ready');
+
+    const oldInfo = getItem(set.id).info!;
+    const plan = planAppend(oldInfo);
+    await ingest.addFiles(set.id, b2);
+    expect(getItem(set.id).append_batch_id).toBe(b2);
+    await expect(upload(base, w, { batchId: b2, relativePath: 'late.bin', filename: 'late.bin' })).rejects.toThrow(/409/);
+    await waitFor(() => getItem(set.id).status === 'snapshotting');
+    expect(refreshed).toEqual([set.id]);
+
+    const row = getItem(set.id);
+    const parsed = parseInfo(row.info!);
+    expect(parsed.files.map((f) => f.path)).toEqual(['x.bin', 'y.bin', 'a-first.bin', 'more/w.bin']);
+    expect(parsed.layout.filter((f) => f.pad).map((f) => f.length)).toEqual([plan.padLength]);
+    expect(plan.padLength).toBe(MiB - 5003);
+    const pieces = Buffer.from((bdecode(row.info!) as { pieces: Uint8Array }).pieces);
+    expect(pieces.subarray(0, plan.keptPieces.length).equals(Buffer.from(plan.keptPieces))).toBe(true);
+    expect(row.file_count).toBe(4);
+    expect(row.total_bytes).toBe(x.length + y.length + z.length + w.length);
+    const lib = env.ctx.config.paths.library;
+    expect(readFileSync(path.join(lib, 'Set', 'a-first.bin')).equals(z)).toBe(true);
+    expect(readFileSync(path.join(lib, 'Set', 'more', 'w.bin')).equals(w)).toBe(true);
+    expect(existsSync(path.join(env.ctx.config.paths.staging, b2))).toBe(false);
+
+    runFakeBackup(env.ctx.db, lib, 'ok');
+    await waitFor(() => getItem(set.id).status === 'ready');
+    expect(getItem(set.id).append_batch_id).toBeNull();
+    expect(refreshed).toEqual([set.id, set.id]);
   });
 });

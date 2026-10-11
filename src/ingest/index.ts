@@ -5,18 +5,29 @@
 // covering restic run, then verified outbox removal) → ready. Web uploads join at hashing.
 // Every step re-reads the item row and uses guarded transitions, so it is restart-safe.
 import type { FastifyInstance } from 'fastify';
-import { lstat, readdir, rename, rm, rmdir } from 'node:fs/promises';
+import { link, lstat, readdir, rename, rm, rmdir } from 'node:fs/promises';
+import path from 'node:path';
 import { findCoveringBackup, requestSnapshot } from '../backup/queue.js';
 import type { AppContext } from '../context.js';
 import { newId } from '../core/ids.js';
-import { NameError, safeJoin, validateSegment } from '../core/paths.js';
+import { assertNoSymlinks, NameError, safeJoin, validateSegment } from '../core/paths.js';
 import type { ItemRow } from '../db/index.js';
 import type { P2PService } from '../p2p/index.js';
 import type { ItemStatus } from '../types.js';
 import { chooseName, isNameTaken, tombstoneName } from './naming.js';
 import { hardlinkTree, mkdirp0750, PlacementError, removeVerifiedOutboxEntry } from './placement.js';
 import { INGEST_EVENT_TYPES, isUnderEntry, runEventLoop, SyncthingClient, type SyncthingEvent } from './syncthing.js';
-import { buildInfoDict, HashAbortedError, hashPieces, pieceLengthFor, renameInfoDict } from './torrent.js';
+import {
+  buildAppendedInfo,
+  buildInfoDict,
+  HashAbortedError,
+  hashPieces,
+  pieceLengthFor,
+  planAppend,
+  renameInfoDict,
+  tailRanges,
+  type HashSource,
+} from './torrent.js';
 import { fingerprint, identityFingerprint, isSyncthingTmp, scanTree, totalBytes, type TreeScan } from './tree.js';
 import { registerUploadRoutes, UploadsHttpError } from './uploads.js';
 
@@ -26,13 +37,15 @@ export interface IngestService {
   retry(itemId: string): Promise<void>;
   renameItem(itemId: string, newName: string): Promise<void>;
   deleteItem(itemId: string): Promise<void>;
+  /** Append the files of an open upload batch to a ready folder item (§4 "add files"). */
+  addFiles(itemId: string, batchId: string): Promise<void>;
   /** tus endpoint + upload batch routes under /api/admin/uploads (admin listener only). */
   registerAdminRoutes(app: FastifyInstance): Promise<void>;
   /** itemId → 0..1 for items currently hashing. */
   progress(): Record<string, number>;
 }
 
-export type IngestDeps = { p2p: Pick<P2PService, 'revokeAllForItem' | 'repointItem'> };
+export type IngestDeps = { p2p: Pick<P2PService, 'revokeAllForItem' | 'repointItem' | 'refreshItemShares'> };
 
 /** Internal tuning knobs (tests use short intervals). All optional. */
 export interface IngestOptions {
@@ -63,7 +76,7 @@ export class IngestError extends Error {
 type ItemFields = Partial<
   Pick<
     ItemRow,
-    'error' | 'library_at' | 'info' | 'piece_length' | 'total_bytes' | 'file_count' | 'snapshot_run_id' | 'ready_at' | 'deleted_at' | 'kind' | 'name'
+    'error' | 'library_at' | 'info' | 'piece_length' | 'total_bytes' | 'file_count' | 'snapshot_run_id' | 'ready_at' | 'deleted_at' | 'kind' | 'name' | 'append_batch_id'
   >
 >;
 const FIELD_NAMES = new Set([
@@ -78,6 +91,7 @@ const FIELD_NAMES = new Set([
   'deleted_at',
   'kind',
   'name',
+  'append_batch_id',
 ]);
 
 interface StabState {
@@ -593,6 +607,7 @@ class Ingest implements IngestService {
     this.aborts.set(id, ctl);
     const lib = this.libraryPath(row.name);
     try {
+      if (row.append_batch_id !== null) return await this.appendItem(row, ctl.signal);
       if (row.library_at === null) {
         if (row.source === 'outbox') {
           // Interrupted during placement (restart): we no longer have the stability evidence.
@@ -667,6 +682,141 @@ class Ingest implements IngestService {
     }
   }
 
+  // ---------------------------------------------------------------- add files (append)
+
+  async addFiles(itemId: string, batchId: string): Promise<void> {
+    if (typeof batchId !== 'string' || !/^[a-z2-7]{26}$/.test(batchId)) throw new IngestError(400, 'invalid upload round id');
+    await this.withLock(itemId, async () => {
+      const row = this.getItem(itemId);
+      if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
+      if (row.kind !== 'dir') throw new IngestError(409, 'files can only be added to a folder item');
+      if (row.status !== 'ready' || !row.info) throw new IngestError(409, 'files can be added once the item is ready');
+      const batch = this.db.prepare('SELECT status FROM upload_batches WHERE id = ?').get(batchId) as { status: string } | undefined;
+      if (!batch) throw new IngestError(404, 'upload round not found');
+      if (batch.status !== 'open') throw new IngestError(409, 'this upload round was already used; start a new upload');
+      const staged = await scanTree(safeJoin(this.cfg.paths.staging, batchId));
+      if (staged.kind !== 'dir' || staged.files.length === 0) {
+        throw new IngestError(400, 'no finished files in this upload round yet; finish or retry the uploads, then try again');
+      }
+      if (staged.special.length > 0) throw new IngestError(400, 'the upload contains special files');
+      // Planning also checks the stored info is a folder torrent we can extend.
+      try {
+        planAppend(row.info);
+      } catch (err) {
+        throw new IngestError(409, (err as Error).message);
+      }
+      const lib = this.libraryPath(row.name);
+      for (const f of staged.files) {
+        for (let i = 1; i <= f.segs.length; i++) {
+          let st;
+          try {
+            st = await lstat(safeJoin(lib, ...f.segs.slice(0, i)));
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+            throw err;
+          }
+          if (i === f.segs.length || !st.isDirectory()) {
+            throw new IngestError(409, `“${f.segs.slice(0, i).join('/')}” already exists in “${row.name}”; rename the new file and upload it again`);
+          }
+        }
+      }
+      // Close the batch first: later tus finishes for it are rejected.
+      const r = this.db
+        .prepare("UPDATE upload_batches SET status = 'ingested', updated_at = ? WHERE id = ? AND status = 'open'")
+        .run(Date.now(), batchId);
+      if (r.changes === 0) throw new IngestError(409, 'this upload round was already used; start a new upload');
+      try {
+        if (!this.transition(itemId, ['ready'], 'hashing', { append_batch_id: batchId, library_at: Date.now(), error: null })) {
+          throw new IngestError(409, 'the item changed; try again');
+        }
+      } catch (err) {
+        this.db.prepare("UPDATE upload_batches SET status = 'open', updated_at = ? WHERE id = ?").run(Date.now(), batchId);
+        // items_active_source: a new outbox entry with this item's source name is being ingested.
+        if (/UNIQUE constraint failed/.test((err as Error).message)) {
+          throw new IngestError(409, 'a new copy of this item is being ingested from the PC outbox; try again once it is done');
+        }
+        throw err;
+      }
+      this.log.info({ itemId, batchId, files: staged.files.length }, 'adding files to item');
+      this.enqueueHash(itemId);
+    });
+  }
+
+  /** Hard-link staging/<append batch> into the item's library folder, then drop the staging copy. Idempotent. */
+  private async placeAppend(row: ItemRow): Promise<void> {
+    const dir = safeJoin(this.cfg.paths.staging, row.append_batch_id!);
+    const staged = await scanTree(dir);
+    if (staged.kind === 'missing') return; // placed before a restart
+    if (staged.kind !== 'dir' || staged.special.length > 0) throw new PlacementError('the upload contains special files');
+    const lib = this.libraryPath(row.name);
+    for (const f of staged.files) {
+      for (const seg of f.segs) validateSegment(seg, { forUpload: true });
+      const dst = safeJoin(lib, ...f.segs);
+      await mkdirp0750(path.dirname(dst));
+      await assertNoSymlinks(lib, path.dirname(dst));
+      try {
+        await link(safeJoin(dir, ...f.segs), dst); // never overwrites
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST') throw err;
+        const st = await lstat(dst);
+        if (st.ino !== f.ino || st.dev !== f.dev) throw new PlacementError(`“${f.rel}” already exists in the item`);
+      }
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  /**
+   * hashing (append mode): place the new files, then extend the stored info: old pieces are kept,
+   * only the old partial last piece (+ pad) and the new files are hashed. Runs under the item lock.
+   */
+  private async appendItem(row: ItemRow, signal: AbortSignal): Promise<void> {
+    const id = row.id;
+    if (!row.info) return this.fail(id, ['hashing'], 'internal: torrent info missing');
+    await this.placeAppend(row);
+    const lib = this.libraryPath(row.name);
+    const plan = planAppend(row.info);
+    const scan = await scanTree(lib);
+    if (scan.kind !== 'dir') return this.fail(id, ['hashing'], 'library copy is missing or not a folder');
+    if (scan.special.length > 0) return this.fail(id, ['hashing'], 'item contains symlinks or special files');
+    const byRel = new Map(scan.files.map((f) => [f.rel, f]));
+    const old = new Set<string>();
+    for (const f of plan.layout) {
+      if (f.pad) continue;
+      const rel = f.segs.join('/');
+      old.add(rel);
+      if (byRel.get(rel)?.size !== f.length) return this.fail(id, ['hashing'], `“${rel}” changed or is missing in the library copy`);
+    }
+    const added = scan.files.filter((f) => !old.has(f.rel));
+    const real = { total_bytes: totalBytes(scan), file_count: scan.files.length };
+    if (added.length === 0) {
+      // Already appended (restart or retry after the info was stored): only the snapshot is left.
+      if (this.transition(id, ['hashing'], 'snapshotting', real)) {
+        await this.deps.p2p.refreshItemShares(id);
+        this.requestIngestSnapshot(id);
+      }
+      return;
+    }
+    const sources: HashSource[] = tailRanges(plan).map((t) => {
+      const f = byRel.get(t.segs.join('/'))!;
+      return { path: safeJoin(lib, ...t.segs), size: f.size, mtimeMs: f.mtimeMs, start: t.start, length: t.length };
+    });
+    if (plan.padLength > 0) sources.push({ zeros: plan.padLength });
+    for (const f of added) sources.push({ path: safeJoin(lib, ...f.segs), size: f.size, mtimeMs: f.mtimeMs });
+    this.progressMap.set(id, 0);
+    const { pieces } = await hashPieces(sources, plan.pieceLength, (p) => this.progressMap.set(id, p), signal);
+    const after = await scanTree(lib);
+    if (identityFingerprint(after) !== identityFingerprint(scan)) return this.fail(id, ['hashing'], 'library copy changed during hashing; retry');
+    const all = new Uint8Array(plan.keptPieces.length + pieces.length);
+    all.set(plan.keptPieces, 0);
+    all.set(pieces, plan.keptPieces.length);
+    const info = buildAppendedInfo(row.info, plan.padLength, added.map((f) => ({ segs: f.segs, length: f.size })), all);
+    if (!this.transition(id, ['hashing'], 'snapshotting', { info, ...real })) return;
+    this.log.info({ itemId: id, added: added.length, pad: plan.padLength }, 'files added to item');
+    await this.deps.p2p.refreshItemShares(id);
+    this.requestIngestSnapshot(id);
+  }
+
   // ---------------------------------------------------------------- snapshotting + outbox removal
 
   private requestIngestSnapshot(id: string): void {
@@ -697,6 +847,14 @@ class Ingest implements IngestService {
       runId = run.id;
       if (!this.setFields(id, 'snapshotting', { snapshot_run_id: runId })) return;
       this.log.info({ itemId: id, name: row.name, runId }, 'item covered by snapshot');
+    }
+    if (row.append_batch_id !== null) {
+      // Files were added to a ready item: its outbox entry is long gone (an entry of the same name
+      // now would be a new item). Make sure every share carries the new info, then done.
+      await this.deps.p2p.refreshItemShares(id);
+      this.transition(id, ['snapshotting'], 'ready', { ready_at: Date.now(), error: null, append_batch_id: null });
+      this.lastRequestAt.delete(id);
+      return;
     }
     if (row.source === 'outbox') {
       // The invariant: only now (verified in library AND covered by a successful snapshot)
@@ -735,7 +893,9 @@ class Ingest implements IngestService {
       if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
       if (row.status !== 'error') throw new IngestError(409, 'only failed items can be retried');
       let target: ItemStatus;
-      if (row.source === 'outbox' && row.library_at === null) {
+      if (row.append_batch_id !== null) {
+        target = 'hashing'; // append mode finds out what is left to do (§4 "add files")
+      } else if (row.source === 'outbox' && row.library_at === null) {
         await rm(this.libraryPath(row.name), { recursive: true, force: true }); // partial hard links only
         target = 'stabilising';
       } else if (row.info === null) {
@@ -798,7 +958,8 @@ class Ingest implements IngestService {
    * whose outbox entry is already gone.
    */
   private async assertDeletable(row: ItemRow): Promise<void> {
-    if (row.source !== 'outbox' || row.status === 'ready') return;
+    // An item that is having files added left the outbox long ago.
+    if (row.source !== 'outbox' || row.status === 'ready' || row.append_batch_id !== null) return;
     if (row.status !== 'error') throw new IngestError(409, STILL_IN_OUTBOX);
     if (await exists(this.outboxPath(row.source_name))) throw new IngestError(409, ERROR_STILL_IN_OUTBOX);
   }
@@ -820,6 +981,9 @@ class Ingest implements IngestService {
       await rm(this.libraryPath(row.name), { recursive: true, force: true });
       if (row.source === 'upload' && row.library_at === null && row.upload_batch_id) {
         await rm(safeJoin(this.cfg.paths.staging, row.upload_batch_id, row.source_name), { recursive: true, force: true });
+      }
+      if (row.append_batch_id !== null) {
+        await rm(safeJoin(this.cfg.paths.staging, row.append_batch_id), { recursive: true, force: true });
       }
       const all: ItemStatus[] = ['incoming', 'stabilising', 'hashing', 'snapshotting', 'ready', 'error'];
       // The row keeps a tombstone name so the real name can be used again by a new item.

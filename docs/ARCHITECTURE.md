@@ -146,7 +146,9 @@ CREATE TABLE items (
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
   ready_at      INTEGER,
-  deleted_at    INTEGER
+  deleted_at    INTEGER,
+  append_batch_id TEXT                          -- (007) upload batch being added to this folder item
+                                                -- ("add files", §4); set from ready → hashing until ready again
 );
 CREATE INDEX items_status ON items(status);
 -- At most one live (non-deleted, non-ready) item per outbox entry:
@@ -324,6 +326,34 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
 
   Existing shares keep their frozen `torrent_name`. New shares use the new name (the info dict is
   re-encoded with the new `name`; pieces are unchanged, so nothing is re-hashed).
+* **add files** (`POST /api/admin/items/:id/add-files {batchId}`, folder items only): files are
+  uploaded into an open upload batch (tus, as for new items) and then appended to a `ready` item.
+  Its shares keep their link, token and `torrent_name` but get a new infohash.
+  1. Check (under the item lock): the item is a `ready` `dir` item, the batch is `open` and holds
+     at least one finished file, and no new path collides with an existing file or folder (409,
+     batch stays open). Close the batch (`ingested`). Then `ready → hashing` with
+     `append_batch_id = <batch>` and `library_at = now`. A 409 is returned instead if a new outbox
+     entry with the item's `source_name` is being ingested (`items_active_source`).
+  2. **hashing (append mode)**: hard-link `staging/<batch>/**` into `/data/library/<name>/`
+     (never overwriting; an existing link to the same inode counts as done), then `rm -r` the
+     staging batch. Every old file must still be in the library with its stored length.
+  3. The new files (library files not in the stored info, byte-sorted by path) go **after** the
+     old ones, starting on a piece boundary. If the old data ends inside a piece, a BEP 47 pad file
+     (`attr: "p"`, path `.pad/<length>`, zero bytes, never on disk) fills that piece. The piece
+     length stays the same. Every old full piece keeps its hash, so only the old partial last piece
+     (old tail + zeros) and the new files are hashed (`hashPieces` takes file ranges and zero
+     runs). A torrent app that has the old files and adds the new `.torrent` into the same folder
+     therefore re-downloads at most one old piece.
+  4. Store the new `info`, `total_bytes` and `file_count` (real files only), `hashing → snapshotting`,
+     then `p2p.refreshItemShares` (§11), then request an ingest snapshot.
+  5. **snapshotting**: as usual, but with no outbox step. Shares are refreshed again (it's
+     idempotent), then `→ ready` and `append_batch_id = NULL`.
+
+  Restart and retry are safe: append mode works out what's left from the library and the stored
+  info. If no new files remain, it goes straight to `snapshotting`. `retry` of an item with
+  `append_batch_id` goes back to `hashing`. Such an item can always be deleted (its outbox entry is
+  long gone), and deleting it also removes the staging batch. Single-file items can't have files
+  added (409): turning them into a folder would change every path.
 
 ## 5. Snapshots (restic runner)
 
@@ -397,6 +427,7 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |
 | POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string, name?: string}` → 200 `UnlockResponse` (§7.3) / 400 `{error:'bad_request'}` (`name` not a string or > 256 chars) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event (detail `{name}` when a name was given, sanitised like nicknames §8) is written at most once per (share, name, client) per 10 min, so several people behind one NAT each get one. |
+| POST | `/api/s/:shareId/refresh` | p2p | body `{token}` → 200 `UnlockResponse` for the **same** token with the share's current info (file list, infohash) / 400 / 401 `{error:'invalid'}` / 404 `{error:'gone'}`. Grants nothing new and records no event. The page calls it when a reloaded tab has a saved session, and when its live socket closes with 4409 (files were added, §8). |
 | POST | `/api/s/:shareId/name` | p2p | body `{token, name}` → 200 `UnlockResponse` whose token is the recipient token for that name (§9) / 400 (missing or empty name, name > 256 chars) / 401 `{error:'invalid'}` (bad token or another share's) / 404 `{error:'gone'}`. Grants nothing beyond the presented token (same share and token_version). Used by the page when it has a name but its saved token has none (unlocked before giving one), and when the recipient changes their name, so the .torrent/magnet links carry it. Writes an `unlocked` event with the name (same 10 min dedupe as unlock). |
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
 | GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
@@ -446,7 +477,8 @@ equal to `ADMIN_BASE_URL`.
 | PATCH | `/api/admin/items/:id` | admin→ingest | `{name}` rename |
 | DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares). 409 for an outbox item that is not ready (an `error` one: while its outbox entry exists), see §4 |
 | POST | `/api/admin/items/:id/retry` | admin→ingest | retry after error |
-| GET | `/api/admin/items/:id/files` | admin | `{path,length}[]` |
+| POST | `/api/admin/items/:id/add-files` | admin→ingest | `{batchId}`: append the files of an open upload batch to a ready folder item (§4 "add files"). 400 bad id / empty batch, 404 unknown item or batch, 409 not a ready folder item, batch not open, or a name already exists in the item. |
+| GET | `/api/admin/items/:id/files` | admin | `{path,length}[]` (BEP 47 pad files left out) |
 | GET | `/api/admin/shares` | admin | `ShareDto[]` (incl. stats) |
 | POST | `/api/admin/shares` | admin→p2p | `{itemId, password?: string, expiresAt?: number}` → `ShareDto` (incl. `url`) |
 | PATCH | `/api/admin/shares/:id` | admin→p2p | `{password?: string|null, expiresAt?: number|null}`. `null` clears; absent = unchanged. Changing the password bumps `token_version`. |
@@ -500,7 +532,9 @@ client → server:
   (§11), so its `done` is not a new completed download. Any other type for `resumed` drops the
   message.
 * `hello` must come first, within 10 s. If the token is invalid, the socket closes with code 4401.
-  If the share is gone, code 4404.
+  If the share is gone, code 4404. When files were added to the share (§4 "add files"), its sockets
+  close with **4409**: the page fetches the new info with `POST /api/s/:id/refresh` (same token),
+  shows a notice and starts over with the new torrent.
 * `stats` comes every 1–2 s. The server ignores more than 2 per second, and ignores values that are
   non-finite or negative.
 * Nicknames are trimmed, have control characters removed, and are ≤ 24 chars. They are rendered
@@ -588,7 +622,8 @@ server → client (every ~1.5 s, and on change):
   share.info_hash`.
 * Webseed: the token must be valid, `torrent_name` must match, and the file path must exist in that
   share's file list. The server resolves `/data/library/<item.name>/<file path>` through `safeJoin`
-  (§core/paths) and refuses symlinks.
+  (§core/paths) and refuses symlinks. A BEP 47 pad file in the list is served as zero bytes,
+  without touching the disk.
 * **Names** (item rename and upload `relativePath` segments):
   - NFC-normalised, 1–200 bytes per segment.
   - None of `/ \ \0`, control characters, or `. ..`.
@@ -641,6 +676,17 @@ is unseeded, its tracker swarm and WebSockets are dropped, and its **in-flight w
 destroyed**; when its `token_version` changes (new password), sockets and webseed responses
 authorised with the old version are closed. `revokeAllForItem` (item delete) also ends every
 in-flight webseed response for the item's shares before the files are removed.
+
+**Files added to an item** (`refreshItemShares`, §4): every non-revoked share of the item gets a new
+info dict, built from the item's new info with the share's frozen `torrent_name` and its own `source`.
+The share id, token and `token_version` stay the same. An `updated` event is written with detail
+`{content:'files_added', files}`. The old infohash's tracker swarm and the share's live sockets are
+closed (4409), and reconcile re-adds the seed torrent, because `Seeder.ensure` compares the
+infohash as well as the token version. Announces for the old infohash are refused from then on.
+Cached parsed info is keyed by infohash. The seeder's read-only store reads pad files as zeros
+(`storeOpts.pads`), and `parseInfo` leaves pads out of `files` (what recipients and the admin
+see), keeping them in `layout`. A browser download that was running starts again with the new
+torrent.
 
 **Browser client:**
 - `client.add(torrent, { strategy:'rarest', deselect:true, maxWebConns: 2 })` with the tracker's
@@ -698,7 +744,7 @@ type AppEventMap = {
   'item.status':      { itemId: string; status: ItemStatus };
   'item.renamed':     { itemId: string; oldName: string; newName: string };
   'item.deleted':     { itemId: string };
-  'share.changed':    { shareId: string; reason: 'created'|'updated'|'revoked'|'expired' };
+  'share.changed':    { shareId: string; reason: 'created'|'updated'|'revoked'|'expired'|'content' };
   'settings.changed': { key: string };
 };
 
@@ -708,10 +754,11 @@ interface IngestService {
   retry(itemId: string): Promise<void>;
   renameItem(itemId: string, newName: string): Promise<void>;
   deleteItem(itemId: string): Promise<void>;          // calls p2p.revokeAllForItem first
+  addFiles(itemId: string, batchId: string): Promise<void>; // §4 "add files"
   registerAdminRoutes(app: FastifyInstance): Promise<void>; // tus + upload batch routes
   progress(): Record<string, number>;                  // itemId → 0..1 while hashing
 }
-createIngest(ctx: AppContext, deps: { p2p: Pick<P2PService,'revokeAllForItem'|'repointItem'> }): IngestService
+createIngest(ctx: AppContext, deps: { p2p: Pick<P2PService,'revokeAllForItem'|'repointItem'|'refreshItemShares'> }): IngestService
 
 // src/p2p/index.ts
 interface P2PService {
@@ -722,6 +769,7 @@ interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;          // after rename: fix seedlinks
+  refreshItemShares(itemId: string): Promise<void>;    // after "add files": new share info, reseed (§11)
   resetUnlockLimits(id: string): void;                 // admin "reset limits"
   swarm(shareId: string): SwarmSnapshot | undefined;
   allSwarms(): Record<string, SwarmSnapshot>;

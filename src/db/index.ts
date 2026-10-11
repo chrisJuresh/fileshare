@@ -25,6 +25,8 @@ export interface ItemRow {
   updated_at: number;
   ready_at: number | null;
   deleted_at: number | null;
+  /** Upload batch being appended to this (ready) folder item; null otherwise. */
+  append_batch_id: string | null;
 }
 
 export interface ShareRow {
