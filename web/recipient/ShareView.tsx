@@ -87,7 +87,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
 
     engine
       .init()
-      .then(() => {
+      .then(async () => {
         if (cancelled || !engine.peerId) return;
         const live = new LiveSocket({
           shareId,
@@ -103,6 +103,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
               uploaded: s.uploaded,
               downloaded: s.downloaded,
               done: s.phase === 'complete',
+              ...(s.resumed ? { resumed: true } : {}),
             };
           },
           onSwarm: setSwarm,
@@ -117,7 +118,12 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
         });
         liveRef.current = live;
         live.start();
-        setSnap(engine.snapshot());
+        // Downloaded here on an earlier visit and the pieces are still stored: seed them again
+        // straight away. The start buttons stay disabled (no snapshot yet) while we check.
+        const files = await engine.resumable();
+        if (cancelled) return;
+        if (files) await resumeSeeding(engine, files);
+        if (!cancelled) setSnap(engine.snapshot());
       })
       .catch(() => {
         if (!cancelled) setInitError("This page couldn't load its download engine. Try reloading the page.");
@@ -260,6 +266,27 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     }
     setStarted(true);
     await engine.start(selectedList());
+  };
+
+  const resumeSeeding = async (engine: Engine, files: number[]): Promise<void> => {
+    setSelected(new Set(files));
+    setStarted(true);
+    if (latest.current.saveMode === 'serviceworker') {
+      // So the per-file Save buttons work again; the zip download doesn't need it.
+      try {
+        const reg = await registerWebTorrentSW();
+        const client = engine.wtClient;
+        if (client) attachStreamServer(client, reg);
+        setSwReady(true);
+      } catch {
+        /* no Save buttons; still seeding */
+      }
+    }
+    if (await engine.resume(files)) return;
+    if (engine.snapshot().phase !== 'idle') return; // stopped (share gone / access lost) or error
+    // Not all of it is stored any more: back to the normal choose-and-download screen.
+    setStarted(false);
+    setSelected(new Set(info.files.map((_, i) => i)));
   };
 
   const downloadAll = async (): Promise<void> => {
@@ -422,7 +449,15 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
 
       {started && snap && (
         <section class="card" aria-labelledby="progress-h">
-          <h2 id="progress-h">{done ? 'All done' : snap.phase === 'error' ? 'Download problem' : 'Downloading'}</h2>
+          <h2 id="progress-h">
+            {done
+              ? 'All done'
+              : snap.phase === 'error'
+                ? 'Download problem'
+                : snap.resumed
+                  ? 'Checking the files you downloaded before'
+                  : 'Downloading'}
+          </h2>
           <progress class="bar big" max={1} value={snap.progress} aria-label="Overall progress" />
           <p class="stats" aria-live="polite">
             <strong>{formatPercent(snap.progress)}</strong>
@@ -445,7 +480,8 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
               {snap.error}
             </p>
           )}
-          {done && saveMode === 'directory' && (
+          {done && snap.resumed && <p class="ok-text">You downloaded these files on an earlier visit.</p>}
+          {done && saveMode === 'directory' && !snap.resumed && (
             <p class="ok-text">{allSaved ? 'Everything is saved in the folder you chose.' : saving ? 'Finishing saving…' : ''}</p>
           )}
           {done && saveMode === 'serviceworker' && (
@@ -458,7 +494,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           )}
           <p class="helping">
             {done
-              ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open to help your friends download faster.`
+              ? `You've shared ${formatBytes(snap.uploaded)} with friends. Keep this tab open to help your friends download faster. If you close it, open this link again later to carry on sharing.`
               : 'Keep this tab open to help your friends download faster.'}
           </p>
         </section>
@@ -499,7 +535,8 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
         <summary>Use a torrent app instead</summary>
         <p>
           If you have a torrent app (like qBittorrent or Transmission), you can download with it instead. Torrent apps
-          keep going when this tab is closed and are good for very large downloads.
+          keep going when this tab is closed and are good for very large downloads. When it has finished, leave it
+          sharing (seeding) in the app for a while so others get it faster.
         </p>
         <p class="muted small">
           The .torrent file and magnet link below are yours: they show your name to the person who shared this link,

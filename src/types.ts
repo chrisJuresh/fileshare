@@ -119,7 +119,7 @@ export interface SwarmSnapshot {
 // --- WebSocket messages (docs/ARCHITECTURE.md §8) ---
 export type ClientMsg =
   | { t: 'hello'; token: string; peerId: string; nick?: string }
-  | { t: 'stats'; progress: number; down: number; up: number; uploaded: number; downloaded: number; done: boolean }
+  | { t: 'stats'; progress: number; down: number; up: number; uploaded: number; downloaded: number; done: boolean; resumed?: boolean }
   | { t: 'nick'; nick: string };
 
 export type ServerMsg = { t: 'swarm'; you: string } & SwarmSnapshot;

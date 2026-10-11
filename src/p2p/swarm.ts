@@ -217,12 +217,14 @@ export class SwarmStats {
       s.announced.delete(a.peerId);
       return;
     }
-    // Only a peer that announced before can complete (a lone `event=completed` is not a download).
+    // Only a peer that announced before with data still to fetch can complete: a lone
+    // `event=completed`, or a client that starts out complete (re-added a finished torrent, a browser
+    // seeding from its stored pieces), is not a download.
     const prev = s.announced.get(a.peerId);
     if (prev) s.announced.delete(a.peerId); // re-insert below: keeps the map ordered oldest-first
     else evictOldest(s.announced, MAX_PEERS_PER_SHARE);
     const begun = prev?.begun === true;
-    const peer: AnnouncedPeer = { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now(), begun: begun || a.event !== 'complete' };
+    const peer: AnnouncedPeer = { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now(), begun: begun || (a.event !== 'complete' && a.left > 0) };
     if (a.name) peer.name = a.name;
     s.announced.set(a.peerId, peer);
     this.peerUploaded(s, a.peerId, a.uploaded);
@@ -560,14 +562,16 @@ export class SwarmStats {
 
       if (msg.t === 'stats') {
         if (++statsMsgs > MAX_STATS_PER_SEC) return;
-        const { progress, down, up, uploaded, downloaded, done } = msg;
+        const { progress, down, up, uploaded, downloaded, done, resumed } = msg;
         if (![progress, down, up, uploaded, downloaded].every(finiteNonNeg) || typeof done !== 'boolean') return;
+        if (resumed !== undefined && typeof resumed !== 'boolean') return;
         peer.progress = Math.min(1, progress);
         peer.down = Math.min(down, MAX_NUM);
         peer.up = Math.min(up, MAX_NUM);
         peer.uploaded = Math.min(uploaded, MAX_NUM);
         this.peerUploaded(s!, peer.peerId, peer.uploaded);
-        if (done && !peer.done) this.markCompleted(s!, peer.peerId, 'browser', peer.nick);
+        // A browser seeding what it downloaded on an earlier visit is not a new download.
+        if (done && !peer.done && resumed !== true) this.markCompleted(s!, peer.peerId, 'browser', peer.nick);
         peer.done = done;
       } else if (msg.t === 'nick') {
         if (++nickMsgs > 1) return;

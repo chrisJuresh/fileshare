@@ -73,4 +73,13 @@ test('per-file save via the service worker and a streamed zip of everything', as
   expect(zipDl.suggestedFilename()).toBe(`${mock.name}.zip`);
   const zip = await readFile(await zipDl.path());
   expect(storedZipHashes(zip)).toEqual(Object.fromEntries(mock.files.map((f) => [f.path, f.sha256])));
+
+  // Reopened: seeding again from browser storage straight away, and Save still works.
+  await page.reload();
+  await expect(page.getByText('You downloaded these files on an earlier visit.')).toBeVisible({ timeout: 30_000 });
+  const again = await hookState(page);
+  expect(again.done).toBe(true);
+  expect(again.peerBytes + again.webseedBytes).toBe(0);
+  const [dl2] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: `Save ${target.path}` }).click()]);
+  expect(createHash('sha256').update(await readFile(await dl2.path())).digest('hex')).toBe(target.sha256);
 });

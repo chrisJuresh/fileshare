@@ -8,6 +8,8 @@ export interface LiveStats {
   uploaded: number;
   downloaded: number;
   done: boolean;
+  /** Seeding a download from an earlier visit (not a new completed download). */
+  resumed?: true;
 }
 
 export interface SwarmView {
@@ -133,6 +135,7 @@ export class LiveSocket {
       uploaded: Math.round(n(s.uploaded)),
       downloaded: Math.round(n(s.downloaded)),
       done: s.done,
+      ...(s.resumed ? { resumed: true } : {}),
     });
   }
 
