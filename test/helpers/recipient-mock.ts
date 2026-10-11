@@ -29,6 +29,8 @@ const webRoot = path.join(repoRoot, 'dist', 'web', 'recipient');
 export interface MockFileSpec {
   path: string;
   size: number;
+  /** Synthetic text to serve instead of `size` random bytes (e.g. a README.md). */
+  content?: string;
 }
 
 export interface RecipientMockOptions {
@@ -97,11 +99,11 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   const single = specs.length === 1 && specs[0]!.path === name;
   const files: MockFile[] = [];
   for (const spec of specs) {
-    const data = randomBytes(spec.size);
+    const data = spec.content === undefined ? randomBytes(spec.size) : Buffer.from(spec.content, 'utf8');
     const abs = single ? path.join(tmp, name) : path.join(tmp, name, ...spec.path.split('/'));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, data);
-    files.push({ path: spec.path, length: spec.size, sha256: createHash('sha256').update(data).digest('hex') });
+    files.push({ path: spec.path, length: data.length, sha256: createHash('sha256').update(data).digest('hex') });
   }
 
   // --- server ---

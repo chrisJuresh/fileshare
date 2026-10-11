@@ -452,7 +452,7 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
 | GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
 | GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers). At most 500 sockets per share and 5000 in total; beyond that the socket is closed with 1013. |
-| GET/HEAD | `/ws/:token/*` | p2p | webseed: `/<torrent_name>/<file path>` (or `/<torrent_name>` for single-file). Range support, throttled by the shared upload limiter, CORS `*` for GET/HEAD only, no cookies. |
+| GET/HEAD | `/ws/:token/*` | p2p | webseed: `/<torrent_name>/<file path>` (or `/<torrent_name>` for single-file). Range support, throttled by the shared upload limiter, CORS `*` for GET/HEAD only, no cookies. The share page also uses it to fetch the first 256 KiB of the share's `README.md` (any case, nearest the root), shown at the bottom of the page (`web/recipient/Readme.tsx`): parsed with marked's lexer and rendered as Preact elements, never as HTML; raw HTML and images are dropped and only absolute http(s)/mailto links are kept. |
 | GET (WS) | `/api/s/:shareId/live` | p2p | swarm stats socket (§8) |
 
 Security headers (all public responses):

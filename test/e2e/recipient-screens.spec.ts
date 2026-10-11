@@ -156,3 +156,85 @@ test('files added to the share: the page reloads its file list and says so', asy
     await open.close();
   }
 });
+
+test('a README.md in the share is rendered under everything else, without raw HTML or unsafe links', async ({ page }) => {
+  const readme = [
+    '# Synthetic Project',
+    '',
+    'Some **bold**, *italic*, `code` &amp; a [safe link](https://example.com/docs).',
+    '',
+    '<script>window.__readmeScript = true</script>',
+    '<div class="injected">raw html</div>',
+    '',
+    '[bad link](javascript:window.__readmeClicked=true) and [relative](docs/b.bin)',
+    '',
+    '## Steps',
+    '',
+    '1. First',
+    '2. Second',
+    '',
+    '- [x] done',
+    '- [ ] todo',
+    '',
+    '> A quote',
+    '',
+    '| Name | Size |',
+    '|:-----|-----:|',
+    '| a    |    1 |',
+    '',
+    '```sh',
+    'echo "<b>not bold</b>"',
+    '```',
+  ].join('\n');
+  const withReadme = await startRecipientMock({
+    password: null,
+    seed: false,
+    files: [
+      { path: 'nested/README.md', size: 0, content: '# Not this one' },
+      { path: 'README.md', size: 0, content: readme },
+      { path: 'docs/b.bin', size: 30_000 },
+    ],
+  });
+  try {
+    await page.addInitScript(() => localStorage.setItem('fileshare.nick', 'Synthetic Sam'));
+    await page.goto(withReadme.shareUrl);
+    const section = page.locator('section', { has: page.getByRole('heading', { name: 'README.md', exact: true }) });
+    await expect(section.getByRole('heading', { name: 'Synthetic Project' })).toBeVisible();
+    // Under everything else on the page.
+    await expect(page.locator('.share > :last-child h2').first()).toHaveText('README.md');
+
+    await expect(section.locator('strong')).toHaveText('bold');
+    await expect(section.locator('p').first()).toContainText('code & a safe link');
+    const safe = section.getByRole('link', { name: 'safe link' });
+    await expect(safe).toHaveAttribute('href', 'https://example.com/docs');
+    await expect(safe).toHaveAttribute('rel', 'noopener noreferrer nofollow');
+    await expect(section.getByRole('link', { name: 'bad link' })).toHaveCount(0);
+    await expect(section.getByText('bad link')).toBeVisible();
+    await expect(section.getByRole('link', { name: 'relative' })).toHaveCount(0);
+    await expect(section.locator('script, .injected')).toHaveCount(0);
+    await expect(section).not.toContainText('raw html');
+    expect(await page.evaluate(() => (window as unknown as { __readmeScript?: boolean }).__readmeScript)).toBeUndefined();
+    await expect(section.getByText('Not this one')).toHaveCount(0);
+
+    await expect(section.locator('ol > li')).toHaveCount(2);
+    await expect(section.locator('input[type=checkbox]:checked')).toHaveCount(1);
+    await expect(section.locator('blockquote')).toHaveText('A quote');
+    await expect(section.locator('td.al-right')).toHaveText('1');
+    await expect(section.locator('pre code')).toHaveText('echo "<b>not bold</b>"');
+    if (process.env.README_SCREENSHOT) await page.screenshot({ path: process.env.README_SCREENSHOT, fullPage: true });
+  } finally {
+    await withReadme.close();
+  }
+});
+
+test('no README section without a README.md', async ({ page }) => {
+  const plain = await startRecipientMock({ password: null, seed: false });
+  try {
+    await page.addInitScript(() => localStorage.setItem('fileshare.nick', 'Synthetic Sam'));
+    await page.goto(plain.shareUrl);
+    await expect(page.getByRole('heading', { name: 'People' })).toBeVisible();
+    await expect(page.locator('.md')).toHaveCount(0);
+  } finally {
+    await plain.close();
+  }
+});

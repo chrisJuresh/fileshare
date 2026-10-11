@@ -44,6 +44,7 @@
     "@uppy/tus": "6.0.0",
     "client-zip": "2.5.1",
     "esbuild": "0.28.2",
+    "marked": "18.0.14",
     "parse-torrent": "11.0.24",
     "preact": "10.29.8",
     "tus-js-client": "4.3.1",

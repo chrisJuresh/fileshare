@@ -24,6 +24,7 @@ import {
   registerZipSW,
   saveToDirectory,
 } from './save.ts';
+import { Readme } from './Readme.tsx';
 import { SwarmTable } from './SwarmTable.tsx';
 import { type TreeNode, buildTree, checkState, toggleNode } from './tree.ts';
 
@@ -561,6 +562,8 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired, onContent
           </button>
         </form>
       </SwarmTable>
+
+      <Readme info={info} />
     </div>
   );
 }
