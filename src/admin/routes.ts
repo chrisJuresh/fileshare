@@ -7,7 +7,7 @@ import type { AppContext } from '../context.js';
 import { NameError, validateSegment } from '../core/paths.js';
 import { isNameTaken } from '../ingest/naming.js';
 import type { ShareRow } from '../db/index.js';
-import type { ShareDto, ShareEventDto, ShareEventType } from '../types.js';
+import { SHAREABLE_STATUSES, type ShareDto, type ShareEventDto, type ShareEventType } from '../types.js';
 import { filesFromInfo, getItemRow, listItems } from './dto.js';
 import type { AdminDeps } from './index.js';
 import { KEY_CAP, MAX_CAP_BPS, MIN_CAP_BPS, readSettings, writeCap } from './settings.js';
@@ -133,7 +133,7 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     const body = parse(CreateShareBody, req.body);
     const item = getItemRow(db, body.itemId);
     if (!item) throw new HttpError(404, 'not_found', 'item not found');
-    if (item.status !== 'ready') throw new HttpError(409, 'not_ready', 'only ready items can be shared');
+    if (!SHAREABLE_STATUSES.includes(item.status)) throw new HttpError(409, 'not_ready', 'items can be shared once hashing is done');
     const share = await p2p.createShare({
       itemId: body.itemId,
       ...(body.password !== undefined ? { password: body.password } : {}),

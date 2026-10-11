@@ -294,7 +294,10 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
      there, and only then deleted; on a late mismatch it is renamed back.)
   3. If verification fails, do **not** delete. Set `error` to "outbox copy changed after ingest;
      not removed". The library copy stays (status `error`, retry re-verifies).
-* **ready**: shareable.
+* **ready**: done. Items are **shareable from `snapshotting` on** (`SHAREABLE_STATUSES`): the torrent
+  info and library copy exist by then, and the snapshot wait only gates removing the outbox copy.
+  If outbox verification then fails (`error`), existing shares keep working — the library copy is
+  intact, and retry goes back to `snapshotting` without re-hashing.
 * **Invariant (tested): an outbox file is never deleted unless it is verified in the library and
   covered by a successful snapshot.**
 * **delete**:

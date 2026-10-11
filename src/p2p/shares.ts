@@ -7,7 +7,7 @@ import { newRecipientId, newShareId, SHARE_ID_RE } from '../core/ids.js';
 import { safeJoin } from '../core/paths.js';
 import { makeShareToken, verifyShareToken } from '../core/tokens.js';
 import type { ItemRow, ShareRow } from '../db/index.js';
-import type { ShareDto, ShareEventType, ShareStatsDto } from '../types.js';
+import { SHAREABLE_STATUSES, type ShareDto, type ShareEventType, type ShareStatsDto } from '../types.js';
 import { buildShareInfo, parseInfo, sharePageUrl, type ParsedInfo } from './metainfo.js';
 
 export type ShareState = 'active' | 'expired' | 'revoked';
@@ -195,7 +195,7 @@ export class ShareStore {
     if (typeof input?.itemId !== 'string') throw new P2PError(400, 'itemId required');
     const item = this.item(input.itemId);
     if (!item || item.status === 'deleted') throw new P2PError(404, 'item not found');
-    if (item.status !== 'ready' || !item.info) throw new P2PError(409, 'item is not ready');
+    if (!SHAREABLE_STATUSES.includes(item.status) || !item.info) throw new P2PError(409, 'item is not ready');
     const expiresAt = input.expiresAt === undefined || input.expiresAt === null ? null : this.validateExpiry(input.expiresAt, now);
     const passwordHash =
       input.password === undefined || input.password === null ? null : await this.hashPassword(this.validatePassword(input.password));

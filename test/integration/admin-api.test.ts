@@ -192,6 +192,16 @@ describe('shares', () => {
     expect(list.map((s) => s.id)).toEqual([dto.id]);
   });
 
+  it('allows sharing while the item waits for its snapshot, not before hashing is done', async () => {
+    const snapshotting = insertItem(h.ctx, { status: 'snapshotting' });
+    for (const status of ['incoming', 'stabilising', 'hashing', 'error'] as const) {
+      const id = insertItem(h.ctx, { status });
+      expect((await call('POST', '/api/admin/shares', { itemId: id })).statusCode).toBe(409);
+    }
+    expect((await call('POST', '/api/admin/shares', { itemId: snapshotting })).statusCode).toBe(201);
+    expect(h.p2p.calls).toEqual([{ method: 'createShare', args: [{ itemId: snapshotting }] }]);
+  });
+
   it('updates, clears and revokes', async () => {
     const item = insertItem(h.ctx);
     const id = insertShare(h.ctx, item, { password: 'p' });
