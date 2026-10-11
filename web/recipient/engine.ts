@@ -490,6 +490,32 @@ async function hasStore(infoHash: string): Promise<boolean> {
   return false;
 }
 
+/**
+ * Makes room before a download of this share: removes other shares' stores that no open tab is using
+ * (as `start` does) and returns the bytes this share's own store already holds. Those pieces are
+ * re-verified and kept, so they don't need space again; counting them as used would ask for them twice.
+ */
+export async function prepareStore(infoHash: string): Promise<number> {
+  await cleanupOtherStores(infoHash).catch(() => {});
+  if (!navigator.storage?.getDirectory) return 0;
+  const root = await navigator.storage.getDirectory();
+  const suffix = ` - ${infoHash.slice(0, 8)}`;
+  let bytes = 0;
+  for await (const [name, handle] of (root as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+    if (name.endsWith(suffix) && handle.kind === 'directory') bytes += await dirBytes(handle as FileSystemDirectoryHandle);
+  }
+  return bytes;
+}
+
+async function dirBytes(dir: FileSystemDirectoryHandle): Promise<number> {
+  let bytes = 0;
+  for await (const handle of (dir as unknown as { values(): AsyncIterable<FileSystemHandle> }).values()) {
+    if (handle.kind === 'file') bytes += (await (handle as FileSystemFileHandle).getFile()).size;
+    else bytes += await dirBytes(handle as FileSystemDirectoryHandle);
+  }
+  return bytes;
+}
+
 async function holdStoreLock(infoHash: string): Promise<{ release: () => void }> {
   const locks = navigator.locks;
   if (!locks) return { release: () => {} };

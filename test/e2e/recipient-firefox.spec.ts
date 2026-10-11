@@ -85,3 +85,50 @@ test('per-file save via the service worker and a streamed zip of everything', as
   const [dl2] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: `Save ${target.path}` }).click()]);
   expect(createHash('sha256').update(await readFile(await dl2.path())).digest('hex')).toBe(target.sha256);
 });
+
+test('storage check frees stale stores and counts the pieces this share already has', async ({ page }) => {
+  // Browser storage holds another share's leftover store and a partial store of this share. With a
+  // quota that only fits once the leftover is removed and the partial store is reused, no warning shows.
+  const stale = 1024 * 1024;
+  const own = 16 * 1024;
+  const quota = mock.files.reduce((s, f) => s + f.length, 0) + 64 * 1024 * 1024 + own / 2;
+  await page.addInitScript((q) => {
+    (window as unknown as { __fileshareTest: object }).__fileshareTest = {};
+    const walk = async (dir: FileSystemDirectoryHandle): Promise<number> => {
+      let n = 0;
+      for await (const h of (dir as unknown as { values(): AsyncIterable<FileSystemHandle> }).values()) {
+        n += h.kind === 'file' ? (await (h as FileSystemFileHandle).getFile()).size : await walk(h as FileSystemDirectoryHandle);
+      }
+      return n;
+    };
+    StorageManager.prototype.estimate = async () => ({ quota: q, usage: await walk(await navigator.storage.getDirectory()) });
+  }, quota);
+  await page.goto(mock.shareUrl);
+  await page.getByLabel('Your name').fill('Synthetic Sam');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
+  await page.evaluate(
+    async ({ staleDir, ownDir, stale, own }) => {
+      const root = await navigator.storage.getDirectory();
+      const put = async (dir: string, size: number): Promise<void> => {
+        const f = await (await root.getDirectoryHandle(dir, { create: true })).getFileHandle('0', { create: true });
+        const w = await f.createWritable();
+        await w.write(new Uint8Array(size));
+        await w.close();
+      };
+      await put(staleDir, stale);
+      await put(ownDir, own);
+    },
+    { staleDir: 'Old share - deadbeef', ownDir: `${mock.name} - ${mock.infoHash.slice(0, 8)}`, stale, own },
+  );
+
+  await page.getByRole('button', { name: 'Start download' }).click();
+  await expect.poll(async () => (await hookState(page)).done, { timeout: 60_000, intervals: [1000] }).toBe(true);
+  await expect(page.getByText('Not enough browser storage')).toHaveCount(0);
+  const left = await page.evaluate(async () => {
+    const names: string[] = [];
+    for await (const n of ((await navigator.storage.getDirectory()) as unknown as { keys(): AsyncIterable<string> }).keys()) names.push(n);
+    return names;
+  });
+  expect(left).not.toContain('Old share - deadbeef');
+});

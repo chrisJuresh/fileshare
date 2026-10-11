@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { UnlockResponse } from '../../src/types.ts';
 import { cleanNick, loadNick, saveNick } from './api.ts';
-import { Engine, type EngineSnapshot, directUrl } from './engine.ts';
+import { Engine, type EngineSnapshot, directUrl, prepareStore } from './engine.ts';
 import {
   type SaveMode,
   type TestState,
@@ -192,9 +192,10 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
   const selectedList = (): number[] => [...selected].sort((a, b) => a - b);
 
   const checkStorage = async (persisted: boolean): Promise<StorageProblem | null> => {
+    const reusable = await prepareStore(info.infoHash).catch(() => 0);
     const est = await storageEstimate();
     if (!est) return null;
-    const available = Math.max(0, est.quota - est.usage);
+    const available = Math.max(0, est.quota - est.usage + reusable);
     const needed = selectedBytes + STORAGE_SLACK;
     return available < needed ? { needed, available, persisted } : null;
   };
