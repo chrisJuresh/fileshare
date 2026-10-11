@@ -392,7 +392,7 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 |---|---|---|---|
 | GET | `/healthz` | server | `{ok:true}` |
 | GET | `/s/:shareId` | server | Serves `dist/web/recipient/index.html` for **any** id (constant shell, no data, `Cache-Control: no-store`). An unknown id must look identical. |
-| GET | `/assets/*` | server | static files from `dist/web/recipient/` (hashed names, long cache) |
+| GET | `/assets/*` | server | static files from `dist/web/recipient/assets/`: `app-<hash>.js/.css` (content-hashed by `build-web.mjs`, which writes the names into `index.html`), `Cache-Control: max-age=7d, immutable` |
 | GET | `/sw.min.js` | server | WebTorrent service worker at root scope (`Service-Worker-Allowed: /`) |
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |

@@ -271,11 +271,22 @@ test('admin routes do not exist on the public listener', async () => {
       expect(text).not.toMatch(/items|shares|uploadCap|status/i);
     }
   }
-  // /assets/* on the public listener is the recipient bundle, never the dashboard's.
+  // /assets/* on the public listener is the recipient bundle, never the dashboard's. Bundle names are
+  // content-hashed (immutable cache), so take them from each index.html.
   const { readFile } = await import('node:fs/promises');
-  const publicJs = await (await fetch(`${stack().publicUrl}/assets/app.js`)).text();
-  expect(publicJs).toBe(await readFile(`${stack().repoDir}/dist/web/recipient/assets/app.js`, 'utf8'));
-  expect(publicJs).not.toBe(await readFile(`${stack().repoDir}/dist/web/admin/assets/app.js`, 'utf8'));
+  const bundle = async (app: string): Promise<string> => {
+    const html = await readFile(`${stack().repoDir}/dist/web/${app}/index.html`, 'utf8');
+    const name = /src="\/assets\/(app-[A-Z0-9]+\.js)"/.exec(html)?.[1];
+    expect(name, `${app} bundle name`).toBeTruthy();
+    return name!;
+  };
+  const recipientJs = await bundle('recipient');
+  const adminJs = await bundle('admin');
+  const publicRes = await fetch(`${stack().publicUrl}/assets/${recipientJs}`);
+  expect(publicRes.headers.get('cache-control')).toContain('immutable');
+  expect(await publicRes.text()).toBe(await readFile(`${stack().repoDir}/dist/web/recipient/assets/${recipientJs}`, 'utf8'));
+  expect((await fetch(`${stack().publicUrl}/assets/${adminJs}`)).status).toBe(404);
+  expect((await fetch(`${stack().publicUrl}/assets/app.js`)).status).toBe(404); // no unhashed bundle any more
   const ws = new WebSocket(`${stack().publicUrl.replace(/^http/, 'ws')}/api/admin/live`, { headers: { 'Cf-Access-Jwt-Assertion': token } });
   const res = await new Promise<number>((resolve) => {
     ws.on('unexpected-response', (_q, r) => resolve(r.statusCode ?? 0));
