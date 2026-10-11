@@ -62,6 +62,12 @@ export interface TrackerOptions {
 }
 
 const DENIED = 'access denied';
+/** Announce interval handed to torrent apps: libtorrent (qBittorrent, Deluge) won't go below 5 min
+ * (`min_announce_interval`). Set on our HTTP responses only: bittorrent-tracker gives WS browsers a
+ * fifth of its own interval (10 min → 2 min), and each browser announce makes fresh WebRTC offers. */
+export const ANNOUNCE_INTERVAL_MS = 5 * 60_000;
+/** A torrent app that missed two announces is gone (row, and the peer list handed to others). */
+export const HTTP_PEER_TTL_MS = 2 * ANNOUNCE_INTERVAL_MS + 2 * 60_000;
 /** HTTP announces per client IP per minute (clients normally announce every few minutes). */
 export const ANNOUNCE_LIMIT: Window = { max: 60, windowMs: 60_000 };
 export const MAX_WS_PER_SHARE = 500;
@@ -84,6 +90,19 @@ function normalizeIp(ip: string | undefined): string | undefined {
 function setPeerIp(params: TrackerParams, ip: string): void {
   params.ip = ip;
   params.addr = `${isIP(ip) === 6 ? `[${ip}]` : ip}:${params.port}`;
+}
+
+/** Bencoded announce response with our `interval` (failures and other bodies pass through). */
+export function withInterval(body: unknown): unknown {
+  if (!(body instanceof Uint8Array)) return body;
+  let dict: unknown;
+  try {
+    dict = bencode.decode(body);
+  } catch {
+    return body;
+  }
+  if (!dict || typeof dict !== 'object' || typeof (dict as { interval?: unknown }).interval !== 'number') return body;
+  return bencode.encode({ ...(dict as object), interval: ANNOUNCE_INTERVAL_MS / 1000 });
 }
 
 function num(v: unknown): number {
@@ -114,6 +133,7 @@ export class TrackerService {
       // We set the client IP ourselves from Fastify's req.ip (which honours the trusted-proxy list);
       // bittorrent-tracker's own trustProxy would trust any X-Forwarded-For blindly.
       trustProxy: false,
+      peersCacheTtl: HTTP_PEER_TTL_MS,
       filter: (infoHash, params, cb) => this.filter(infoHash, params, cb),
     });
     const log = ctx.log;
@@ -238,6 +258,8 @@ export class TrackerService {
         reply.raw.setHeader('Content-Type', 'text/plain');
         reply.raw.setHeader('Cache-Control', 'no-store');
         reply.raw.setHeader('X-Content-Type-Options', 'nosniff');
+        const end = reply.raw.end.bind(reply.raw) as (...a: unknown[]) => unknown;
+        reply.raw.end = ((body?: unknown, ...rest: unknown[]) => end(withInterval(body), ...rest)) as typeof reply.raw.end;
         this.server.onHttpRequest(req.raw, reply.raw, { action: 'announce' });
       },
     });

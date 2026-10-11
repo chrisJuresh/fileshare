@@ -91,5 +91,6 @@ export const TrackerServerCtor = TrackerServerImpl as new (opts: {
   stats: false;
   trustProxy: boolean;
   interval?: number;
+  peersCacheTtl?: number;
   filter: (infoHash: string, params: TrackerParams, cb: (err: Error | null) => void) => void;
 }) => TrackerServer;

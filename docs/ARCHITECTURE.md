@@ -535,6 +535,11 @@ server → client (every ~1.5 s, and on change):
 * A live socket that sent no `stats` for 90 s (a frozen background tab, a phone that slept) has no row
   of its own, and its tracker row is hidden too; it is back with its next `stats`. A WebRTC wire
   from it still shows while connected.
+* Torrent apps are told to announce every 5 min (libtorrent's floor; set on the HTTP announce
+  response only — browsers keep bittorrent-tracker's 2 min WS interval, as each browser announce
+  makes fresh WebRTC offers). An app that missed two announces (12 min) loses its row and leaves the
+  tracker's peer list. Announces live in memory only: after a restart an app's row is back with its
+  next announce.
 * Peers that disconnect are removed after 30 s (so a network blip doesn't make them flicker). A
   browser whose page was closed or reloaded is removed at once: its live socket closes with 1001
   ("going away"), and its WebRTC wire and tracker rows are hidden while they wind down (a reload comes

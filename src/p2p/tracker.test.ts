@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { makeEnv, makeItem, sleep, startPublic, waitFor, type MadeItem, type TestEnv } from '../../test/integration/p2p-helpers.js';
 import type { P2P } from './index.js';
-import { scrub } from './tracker.js';
+import { scrub, withInterval } from './tracker.js';
 import { bencode } from './vendor.js';
 
 let env: TestEnv;
@@ -103,6 +103,22 @@ describe('HTTP tracker', () => {
     expect((await announce(tokenA, a.share.infoHash, '-qB4650-recipient004')).body['failure reason']).toBeUndefined();
     await p2p.updateShare(a.share.id, { password: 'synthetic-new' });
     await fail(announce(tokenA, a.share.infoHash, '-qB4650-recipient004'));
+  });
+
+  it('the interval rewrite keeps compact peers byte for byte and leaves failures alone', () => {
+    const peers = new Uint8Array([192, 0, 2, 1, 0x1a, 0xe1, 255, 0, 128, 7, 0, 1]);
+    const out = bencode.decode(withInterval(bencode.encode({ complete: 1, incomplete: 0, interval: 600, peers })) as Uint8Array) as Record<string, unknown>;
+    expect(out.interval).toBe(300);
+    expect(Buffer.from(out.peers as Uint8Array).equals(Buffer.from(peers))).toBe(true);
+    const failure = bencode.encode({ 'failure reason': 'access denied' });
+    expect(withInterval(failure)).toBe(failure);
+    expect(withInterval('404 Not Found')).toBe('404 Not Found');
+  });
+
+  it('tells torrent apps to announce every 5 min (libtorrent will not go lower)', async () => {
+    const { share, token } = await newShare();
+    const res = await announce(token, share.infoHash, '-qB4650-interval0001');
+    expect(res.body.interval).toBe(300);
   });
 
   it('scrape and plain GET of the WS path are 404', async () => {

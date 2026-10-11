@@ -10,7 +10,7 @@ import type { ClientMsg, ServerMsg, ShareStatsDto, SwarmPeer, SwarmSnapshot } fr
 import { RateMeter } from './limiter.js';
 import type { WtTorrent, WtWire } from './seeder.js';
 import { shareState, type ShareStore } from './shares.js';
-import type { AnnounceInfo } from './tracker.js';
+import { HTTP_PEER_TTL_MS, type AnnounceInfo } from './tracker.js';
 
 export const LINGER_MS = 30_000;
 /** A live socket that sent no stats for this long (a frozen background tab, a phone that slept) has no
@@ -21,7 +21,7 @@ const MAX_STATS_PER_SEC = 2;
 const MAX_MSGS_PER_SEC = 20;
 const MAX_SOCKETS_PER_SHARE = 500;
 const MAX_MSG_CHARS = 4096;
-const ANNOUNCE_TTL_MS = { http: 25 * 60_000, ws: 5 * 60_000 } as const;
+const ANNOUNCE_TTL_MS = { http: HTTP_PEER_TTL_MS, ws: 5 * 60_000 } as const;
 const PEER_ID_RE = /^[0-9a-f]{40}$/;
 const MAX_NUM = 1e15;
 /** Per-share bound on remembered peers (announces, upload ledger, completions); oldest evicted. */
