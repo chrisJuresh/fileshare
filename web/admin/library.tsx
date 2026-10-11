@@ -1,10 +1,11 @@
-// Library tab: items table with inline rename, delete, retry, file list and "Share".
+// Library tab: items table with inline rename, delete, retry, file list, "Add files" and "Share".
 import { Fragment } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { SHAREABLE_STATUSES, type FileEntry, type ItemDto } from '../../src/types.ts';
 import { api, errorMessage } from './api.ts';
 import { fmtBytes, fmtDate } from './format.ts';
-import { ConfirmDialog, Progress, StatusBadge, useNotify } from './ui.tsx';
+import { ConfirmDialog, Modal, Progress, StatusBadge, useNotify } from './ui.tsx';
+import { addFilesBatchKey, UploadBox } from './upload.tsx';
 
 function RenameCell(props: { item: ItemDto; onDone: () => void; onCancel: () => void }) {
   const [name, setName] = useState(props.item.name);
@@ -86,9 +87,45 @@ function FilesRow(props: { item: ItemDto; files: FileEntry[] | 'loading' | strin
   );
 }
 
+/** Upload more files into a ready folder item. Its share links stay the same and show the new files. */
+function AddFilesDialog(props: { item: ItemDto | null; onClose: () => void; onAdded: () => void }) {
+  const item = props.item;
+  return (
+    <Modal open={item !== null} title={`Add files to “${item?.name ?? ''}”`} onClose={props.onClose} wide>
+      {item && (
+        <>
+          <p>
+            New files go into the folder next to what is there. A file or folder with the same name as an existing one is refused:
+            rename it first.
+          </p>
+          <p class="muted small">
+            {item.activeShares > 0
+              ? `The ${item.activeShares} active link${item.activeShares === 1 ? '' : 's'} stay the same and show the new files once they are processed. `
+              : ''}
+            People who already have the earlier files in a torrent app can download the .torrent again into the same folder: it keeps
+            what they have and only fetches the new files. A download running in a browser starts again.
+          </p>
+          <UploadBox
+            batchKey={addFilesBatchKey(item.id)}
+            height={320}
+            note="Files or folders. Uploads resume after interruptions (keep this dialog open until they finish)."
+            finish={async (batchId, ok) => {
+              await api('POST', `/api/admin/items/${encodeURIComponent(item.id)}/add-files`, { batchId });
+              props.onAdded();
+              props.onClose();
+              return `Adding ${ok} file${ok === 1 ? '' : 's'} to “${item.name}”. Its links show them once hashing is done.`;
+            }}
+          />
+        </>
+      )}
+    </Modal>
+  );
+}
+
 export function Library(props: { items: ItemDto[] | null; error: string | null; onChanged: () => void; onShare: (i: ItemDto) => void }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<ItemDto | null>(null);
+  const [adding, setAdding] = useState<ItemDto | null>(null);
   const [files, setFiles] = useState<Record<string, FileEntry[] | 'loading' | string>>({});
   const notify = useNotify();
 
@@ -200,6 +237,11 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
                         Share
                       </button>
                     )}
+                    {item.kind === 'dir' && item.status === 'ready' && (
+                      <button type="button" class="btn btn-small" onClick={() => setAdding(item)} aria-label={`Add files to ${item.name}`}>
+                        Add files
+                      </button>
+                    )}
                     {item.status === 'error' && (
                       <button type="button" class="btn btn-small" onClick={() => void retry(item)}>
                         Retry
@@ -230,6 +272,16 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
           </tbody>
         </table>
       </div>
+
+      <AddFilesDialog
+        item={adding}
+        onClose={() => setAdding(null)}
+        onAdded={() => {
+          const id = adding?.id;
+          if (id) setFiles(({ [id]: _drop, ...rest }) => rest);
+          props.onChanged();
+        }}
+      />
 
       <ConfirmDialog
         open={deleting !== null}

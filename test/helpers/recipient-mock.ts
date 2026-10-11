@@ -68,9 +68,11 @@ export interface RecipientMock {
   infoHash: string;
   files: MockFile[];
   /** `liveCloseCodes`: close code of every live socket that had said hello (1001 = page closed or reloaded). */
-  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; liveCloseCodes: number[]; unlockNames: unknown[]; nameSwaps: unknown[] };
+  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; liveCloseCodes: number[]; unlockNames: unknown[]; nameSwaps: unknown[]; refreshes: number };
   /** Makes the share gone and closes live sockets with 4404 (revocation mid-download). */
   revoke(): void;
+  /** Closes live sockets with 4409 ("files were added": the page reloads its info via /refresh). */
+  contentChanged(): void;
   close(): Promise<void>;
 }
 
@@ -138,7 +140,7 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   app.get('/s/:shareId', (_req, reply) => sendStatic(webRoot, 'index.html', reply, { 'Cache-Control': 'no-store' }));
 
   let revoked = false;
-  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], liveCloseCodes: [], unlockNames: [], nameSwaps: [] };
+  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], liveCloseCodes: [], unlockNames: [], nameSwaps: [], refreshes: 0 };
   const isShare = (id: string): boolean => id === shareId && !revoked;
   const tokenOk = (t: string | undefined): boolean => t === token && !revoked;
 
@@ -170,6 +172,15 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
     if (!isShare(req.params.id)) return reply.code(404).send({ error: 'gone' });
     if (typeof req.body?.token !== 'string' || !tokenOk(req.body.token)) return reply.code(401).send({ error: 'invalid' });
     stats.nameSwaps.push(req.body?.name);
+    return unlockBody;
+  });
+
+  // Same token back with the current info (the mock's files never change).
+  app.post<{ Params: { id: string }; Body: { token?: unknown } }>('/api/s/:id/refresh', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isShare(req.params.id)) return reply.code(404).send({ error: 'gone' });
+    if (typeof req.body?.token !== 'string' || !tokenOk(req.body.token)) return reply.code(401).send({ error: 'invalid' });
+    stats.refreshes++;
     return unlockBody;
   });
 
@@ -403,6 +414,9 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
     revoke() {
       revoked = true;
       for (const s of sockets) s.close(4404);
+    },
+    contentChanged() {
+      for (const s of sockets) s.close(4409);
     },
     async close() {
       for (const s of sockets) s.terminate();

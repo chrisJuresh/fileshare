@@ -25,8 +25,8 @@ export interface LiveOptions {
   stats: () => LiveStats;
   onSwarm: (s: SwarmView) => void;
   onConnection: (connected: boolean) => void;
-  /** 4401 (token no longer valid) or 4404 (share gone): no reconnect. */
-  onFatal: (code: 4401 | 4404) => void;
+  /** 4401 (token no longer valid), 4404 (share gone) or 4409 (files changed: reload the info): no reconnect. */
+  onFatal: (code: 4401 | 4404 | 4409) => void;
 }
 
 const STATS_INTERVAL_MS = 1500;
@@ -102,7 +102,7 @@ export class LiveSocket {
       this.ws = null;
       this.clearStats();
       this.opts.onConnection(false);
-      if (ev.code === 4401 || ev.code === 4404) {
+      if (ev.code === 4401 || ev.code === 4404 || ev.code === 4409) {
         this.stopped = true;
         this.opts.onFatal(ev.code);
         return;

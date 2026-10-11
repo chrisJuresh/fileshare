@@ -32,6 +32,9 @@ interface Props {
   info: UnlockResponse;
   onRevoked: (hadStarted: boolean) => void;
   onAccessExpired: () => void;
+  /** The sender added files: the page reloads the share's info (and remounts this view). */
+  onContentChanged: () => void;
+  notice?: string;
 }
 
 interface StorageProblem {
@@ -45,7 +48,7 @@ const STORAGE_SLACK = 64 * 1024 * 1024;
 /** Above this, the in-browser download carries a warning pointing to a torrent app. */
 const BIG_BROWSER_DOWNLOAD = 1_000_000_000;
 
-export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) {
+export function ShareView({ shareId, info, onRevoked, onAccessExpired, onContentChanged, notice }: Props) {
   const root = useMemo(() => buildTree(info.files), [info]);
   const single = info.files.length === 1 && info.files[0]?.path === info.name;
   const [selected, setSelected] = useState<Set<number>>(() => new Set(info.files.map((_, i) => i)));
@@ -118,6 +121,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
             const hadStarted = latest.current.started;
             engine.stop();
             if (code === 4404) onRevoked(hadStarted);
+            else if (code === 4409) onContentChanged();
             else onAccessExpired();
           },
         });
@@ -368,6 +372,11 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           {info.expiresAt !== null &&
             ` · Expires ${new Date(info.expiresAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`}
         </p>
+        {notice && (
+          <p class="notice" role="status">
+            {notice}
+          </p>
+        )}
       </header>
 
       <section class="panel torrent" aria-labelledby="torrent-h">

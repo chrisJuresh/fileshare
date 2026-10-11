@@ -7,6 +7,7 @@ import {
   loadNick,
   loadSession,
   nameToken,
+  refreshSession,
   saveNick,
   saveSession,
   shareIdFromLocation,
@@ -21,7 +22,8 @@ type Screen =
   | { k: 'gone' }
   | { k: 'gate'; passwordRequired: boolean; notice?: string }
   | { k: 'error'; message: string }
-  | { k: 'share'; info: UnlockResponse }
+  /** `rev` remounts the share view (its engine was stopped) even if the infohash did not change. */
+  | { k: 'share'; info: UnlockResponse; notice?: string; rev?: number }
   | { k: 'revoked'; hadStarted: boolean };
 
 export function App() {
@@ -61,8 +63,23 @@ export function App() {
         }
       }
       if (saved && name) {
-        setScreen({ k: 'share', info: saved });
-        return;
+        // The share's files may have changed since this tab saved its info.
+        const r = await refreshSession(shareId, saved.token);
+        if (r.ok) {
+          saveSession(shareId, r.data);
+          setScreen({ k: 'share', info: r.data });
+          return;
+        }
+        if (r.reason === 'gone') {
+          clearSession(shareId);
+          setScreen({ k: 'gone' });
+          return;
+        }
+        if (r.reason === 'error') {
+          setScreen({ k: 'share', info: saved });
+          return;
+        }
+        clearSession(shareId); // invalid: unlock again below
       }
       if (status.status === 'open' && !status.passwordRequired && name) {
         const r = await unlock(shareId, name);
@@ -77,6 +94,28 @@ export function App() {
       setScreen({ k: 'gate', passwordRequired: status.passwordRequired });
     } catch {
       setScreen({ k: 'error', message: "We couldn't reach the server. Check your connection and try again." });
+    }
+  };
+
+  /** The sender added files to the share: load the new file list for the token we hold. */
+  const contentChanged = async (token: string): Promise<void> => {
+    if (!shareId) return;
+    const r = await refreshSession(shareId, token);
+    if (r.ok) {
+      saveSession(shareId, r.data);
+      setScreen({
+        k: 'share',
+        info: r.data,
+        rev: Date.now(),
+        notice:
+          'Files were added to this share. If your torrent app already has the earlier files, download the .torrent file again and save it to the same folder: it only fetches what is new.',
+      });
+    } else if (r.reason === 'gone') {
+      clearSession(shareId);
+      setScreen({ k: 'gone' });
+    } else {
+      clearSession(shareId);
+      void boot();
     }
   };
 
@@ -114,9 +153,11 @@ export function App() {
         )}
         {screen.k === 'share' && shareId && (
           <ShareView
-            key={screen.info.token}
+            key={`${screen.info.token} ${screen.info.infoHash} ${screen.rev ?? 0}`}
             shareId={shareId}
             info={screen.info}
+            notice={screen.notice}
+            onContentChanged={() => void contentChanged(screen.info.token)}
             onRevoked={(hadStarted) => {
               clearSession(shareId);
               setScreen({ k: 'revoked', hadStarted });

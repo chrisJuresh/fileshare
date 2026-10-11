@@ -35,6 +35,9 @@ export interface EngineSnapshot {
   error: string | null;
 }
 
+/** WebTorrent path of a BEP 47 pad file (`<name>/.pad/<length>`). */
+const PAD_PATH = /(^|\/)\.pad\/\d+$/;
+
 /** No peer data for this long (ms) → add the webseed. */
 const DEFAULT_WEBSEED_AFTER_MS = 10_000;
 /** Needed pieces missing from every connected peer for this long (ms) → add the webseed. */
@@ -232,9 +235,10 @@ export class Engine {
   private mapFiles(torrent: WtTorrent): void {
     const byPath = new Map<string, WtFile>();
     for (const f of torrent.files) byPath.set(f.path, f);
-    this.fileMap = this.info.files.map(
-      (f, i) => byPath.get(`${torrent.name}/${f.path}`) ?? byPath.get(f.path) ?? torrent.files[i],
-    );
+    // info.files leaves out BEP 47 pad files (WebTorrent lists them as ordinary files), so an index
+    // fallback must skip them too.
+    const real = torrent.files.filter((f) => !PAD_PATH.test(f.path));
+    this.fileMap = this.info.files.map((f, i) => byPath.get(`${torrent.name}/${f.path}`) ?? byPath.get(f.path) ?? real[i]);
   }
 
   private allSelectedDone(): boolean {

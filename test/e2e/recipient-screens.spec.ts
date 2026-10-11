@@ -132,3 +132,27 @@ test('revocation mid-download stops and explains', async ({ page }) => {
     await slow.close();
   }
 });
+
+test('files added to the share: the page reloads its file list and says so', async ({ page }) => {
+  const open = await startRecipientMock({ password: null, seed: false, name: 'Growing Synthetic Folder' });
+  try {
+    await page.goto(open.shareUrl);
+    await page.getByLabel('Your name').fill('Synthetic Sam');
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    await expect.poll(() => open.stats.live.length).toBe(1);
+    expect(open.stats.refreshes).toBe(0);
+    open.contentChanged();
+    await expect(page.getByText('Files were added to this share.', { exact: false })).toBeVisible();
+    expect(open.stats.refreshes).toBe(1);
+    await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    // The view was remounted: it connects to the live socket again.
+    await expect.poll(() => open.stats.live.length).toBe(1);
+    // A reload of the tab checks its saved info against the server too.
+    await page.reload();
+    await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    expect(open.stats.refreshes).toBe(2);
+  } finally {
+    await open.close();
+  }
+});

@@ -277,6 +277,23 @@ Common causes: the PC went to sleep or lost Wi-Fi mid-transfer (completion < 100
 the PC keeps writing into the folder; `SYNCTHING_PC_DEVICE_ID` is empty or wrong (re-run
 `scripts/pair-pc.sh`); a file is ignored on one side only (the `.stignore` lists must match).
 
+### Adding files to a folder that is already shared
+
+Dashboard → Library → **Add files** on a ready folder item, then upload the new files there. Only
+the new files are uploaded. They are appended to the item's torrent after a BEP 47 pad file
+(ARCHITECTURE §4 "add files"), and every share link of the item stays the same and shows them once
+hashing is done. Things to tell recipients:
+
+- **Torrent app:** download the `.torrent` from the link again and save it to the **same folder** as
+  before. The app rechecks what it has and fetches only the new files (and at most one old piece).
+  The old torrent stops getting peers, so a client still running it shows tracker errors.
+- **Browser:** an open page reloads its file list by itself and shows a notice. A download that was
+  running in the browser starts again.
+
+A new file can't have the same name as something already in the folder: rename it and upload
+again. Single-file items can't have files added. Put the file in a folder and share that instead.
+If an add fails (status Error), **Retry** picks up where it stopped.
+
 ### Recipient locked out of a password share
 
 Wrong passwords are limited to 5 per 10 minutes per recipient and 50 per hour per share (§7.1 in

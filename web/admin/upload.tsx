@@ -1,7 +1,7 @@
 // Upload tab: Uppy Dashboard + tus (resumable, 50 MiB chunks), files and folders.
 // Flow: create a batch before the first file starts → upload with meta {batchId, relativePath,
-// filename} → when every file of the round succeeded, complete the batch (its top-level entries
-// become library items).
+// filename} → when every file of the round succeeded, finish the batch: on the Upload tab its
+// top-level entries become library items; in "Add files" they are appended to an existing item.
 import Uppy from '@uppy/core';
 import Dashboard from '@uppy/dashboard';
 import Tus from '@uppy/tus';
@@ -12,6 +12,8 @@ import { useNotify } from './ui.tsx';
 const CHUNK = 50 * 1024 * 1024;
 /** The open batch survives reloads: resumed tus uploads keep the batch they were created in. */
 const BATCH_KEY = 'fileshare.upload.batchId';
+/** Same, per item, for "Add files". */
+export const addFilesBatchKey = (itemId: string): string => `fileshare.addfiles.${itemId}`;
 const BAD_UPLOAD_CHARS = /[#?%\\\u0000-\u001f\u007f]/;
 
 type Meta = { batchId?: string; relativePath?: string | null; filename?: string; [k: string]: unknown };
@@ -22,25 +24,25 @@ export function cleanRelativePath(rel: unknown, name: string): string {
   return rel.replace(/^\/+/, '');
 }
 
-function storedBatch(): string | null {
+function storedBatch(key: string): string | null {
   try {
-    return localStorage.getItem(BATCH_KEY);
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
 }
-function storeBatch(id: string | null): void {
+function storeBatch(key: string, id: string | null): void {
   try {
-    if (id) localStorage.setItem(BATCH_KEY, id);
-    else localStorage.removeItem(BATCH_KEY);
+    if (id) localStorage.setItem(key, id);
+    else localStorage.removeItem(key);
   } catch {
     /* storage unavailable: resumes after a reload may then need a new round */
   }
 }
 
 /** Reuse the remembered batch while the server still has it open; otherwise start a new one. */
-async function openBatch(): Promise<string> {
-  const remembered = storedBatch();
+async function openBatch(key: string): Promise<string> {
+  const remembered = storedBatch(key);
   if (remembered && /^[a-z2-7]{26}$/.test(remembered)) {
     try {
       const b = await api<{ id: string; status: string }>('GET', `/api/admin/uploads/batches/${remembered}`);
@@ -50,17 +52,46 @@ async function openBatch(): Promise<string> {
     }
   }
   const r = await api<{ id: string }>('POST', '/api/admin/uploads/batches');
-  storeBatch(r.id);
+  storeBatch(key, r.id);
   return r.id;
 }
 
 export function Upload(props: { onItemsChanged: () => void }) {
+  return (
+    <div>
+      <UploadBox
+        batchKey={BATCH_KEY}
+        note="Files or whole folders. Uploads resume after interruptions. Each top-level file or folder becomes one library item."
+        finish={async (batchId, ok) => {
+          await api('POST', `/api/admin/uploads/batches/${encodeURIComponent(batchId)}/complete`);
+          props.onItemsChanged();
+          return `Upload complete: ${ok} file${ok === 1 ? '' : 's'} added. They appear in the Library as they are processed.`;
+        }}
+      />
+      <p class="muted small">
+        Large uploads are sent in 50 MiB pieces. If the connection drops, add the same files again and they resume where they left off.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Uppy Dashboard uploading one round (batch) over tus. When every file of the round succeeded,
+ * `finish` hands the batch to the server and returns the success message.
+ */
+export function UploadBox(props: {
+  batchKey: string;
+  note: string;
+  height?: number;
+  finish: (batchId: string, okCount: number) => Promise<string>;
+}) {
   const target = useRef<HTMLDivElement>(null);
   const notify = useNotify();
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
-  const changedRef = useRef(props.onItemsChanged);
-  changedRef.current = props.onItemsChanged;
+  const finishRef = useRef(props.finish);
+  finishRef.current = props.finish;
+  const key = props.batchKey;
 
   useEffect(() => {
     if (!target.current) return;
@@ -82,11 +113,11 @@ export function Upload(props: { onItemsChanged: () => void }) {
       inline: true,
       target: target.current,
       width: '100%',
-      height: 460,
+      height: props.height ?? 460,
       theme: 'auto',
       fileManagerSelectionType: 'both',
       proudlyDisplayPoweredByUppy: false,
-      note: 'Files or whole folders. Uploads resume after interruptions. Each top-level file or folder becomes one library item.',
+      note: props.note,
     });
     uppy.use(Tus, {
       endpoint: '/api/admin/uploads/tus/',
@@ -98,7 +129,7 @@ export function Upload(props: { onItemsChanged: () => void }) {
     });
 
     uppy.addPreProcessor(async (fileIDs) => {
-      if (!batchId) batchId = await openBatch();
+      if (!batchId) batchId = await openBatch(key);
       for (const id of fileIDs) {
         const f = uppy.getFile(id);
         if (!f) continue;
@@ -112,25 +143,24 @@ export function Upload(props: { onItemsChanged: () => void }) {
       const failed = result.failed?.length ?? 0;
       if (!batchId || ok === 0) return;
       if (failed > 0) {
-        notifyRef.current(`${failed} file(s) failed. Retry them; the upload is added to the library once all files are in.`, 'error');
+        notifyRef.current(`${failed} file(s) failed. Retry them; the upload is added once all files are in.`, 'error');
         return;
       }
       const id = batchId;
       void (async () => {
         try {
-          await api('POST', `/api/admin/uploads/batches/${encodeURIComponent(id)}/complete`);
+          const message = await finishRef.current(id, ok);
           batchId = null;
-          storeBatch(null);
+          storeBatch(key, null);
           uppy.clear();
-          notifyRef.current(`Upload complete: ${ok} file${ok === 1 ? '' : 's'} added. They appear in the Library as they are processed.`);
-          changedRef.current();
+          notifyRef.current(message);
         } catch (e) {
-          // The round can't be completed any more (already added, or unknown): start fresh next time.
+          // The round can't be used any more (already added, unknown, or a name clash): start fresh next time.
           if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
             batchId = null;
-            storeBatch(null);
+            storeBatch(key, null);
           }
-          notifyRef.current(`Upload finished, but adding it to the library failed: ${errorMessage(e)}`, 'error');
+          notifyRef.current(`Upload finished, but adding it failed: ${errorMessage(e)}`, 'error');
         }
       })();
     });
@@ -139,14 +169,7 @@ export function Upload(props: { onItemsChanged: () => void }) {
     return () => {
       uppy.destroy();
     };
-  }, []);
+  }, [key]);
 
-  return (
-    <div>
-      <div ref={target} class="uppy-host" />
-      <p class="muted small">
-        Large uploads are sent in 50 MiB pieces. If the connection drops, add the same files again and they resume where they left off.
-      </p>
-    </div>
-  );
+  return <div ref={target} class="uppy-host" />;
 }
