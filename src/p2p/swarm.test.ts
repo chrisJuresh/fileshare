@@ -151,6 +151,26 @@ describe('live stats socket', () => {
     a.ws.close();
   });
 
+  it('a browser seeding a download from an earlier visit (resumed) is not a completion', async () => {
+    const { share, token } = await newShare();
+    const a = await connect(share.id);
+    a.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_A }));
+    await waitFor(() => a.last());
+    await sleep(1000); // fresh rate window
+    const done = { t: 'stats', progress: 1, down: 0, up: 10, uploaded: 700, downloaded: 1, done: true };
+    a.ws.send(JSON.stringify({ ...done, resumed: 'yes' })); // bad type: whole message ignored
+    a.ws.send(JSON.stringify({ ...done, resumed: true }));
+    await waitFor(() => a.last()?.peers.find((p) => p.id === a.last()!.you)?.uploaded === 700);
+    await sleep(1100);
+    a.ws.send(JSON.stringify({ ...done, resumed: true, uploaded: 800 }));
+    await waitFor(() => a.last()?.peers.find((p) => p.id === a.last()!.you)?.uploaded === 800);
+    p2p.stats.flush();
+    expect(a.last()!.totals.completed).toBe(0);
+    expect(p2p.getShare(share.id)!.stats).toMatchObject({ completedDownloads: 0, peerBytes: 800 });
+    expect(env.ctx.db.prepare("SELECT COUNT(*) AS n FROM share_events WHERE share_id = ? AND type = 'completed'").get(share.id)).toEqual({ n: 0 });
+    a.ws.close();
+  });
+
   it('disconnected peers linger, then disappear', async () => {
     const { share, token } = await newShare();
     const a = await connect(share.id);
@@ -192,8 +212,8 @@ describe('live stats socket', () => {
 
 describe('swarm accounting under churn and spam', () => {
   const pid = (n: number) => n.toString(16).padStart(40, '0');
-  const ann = (shareId: string, peerId: string, event: 'start' | 'update' | 'complete' | 'stop', uploaded = 0) =>
-    p2p.stats.onAnnounce({ shareId, peerId, type: 'http', event, left: 0, uploaded, downloaded: 0 });
+  const ann = (shareId: string, peerId: string, event: 'start' | 'update' | 'complete' | 'stop', uploaded = 0, left = event === 'complete' ? 0 : 1) =>
+    p2p.stats.onAnnounce({ shareId, peerId, type: 'http', event, left, uploaded, downloaded: 0 });
   type St = { announced: Map<string, unknown>; lastUploaded: Map<string, number>; completed: Set<string> };
   const state = (shareId: string) => (p2p.stats as unknown as { states: Map<string, St> }).states.get(shareId);
 
@@ -226,6 +246,15 @@ describe('swarm accounting under churn and spam', () => {
     ann(share.id, pid(1), 'complete');
     p2p.stats.flush();
     expect(p2p.getShare(share.id)!.stats.completedDownloads).toBe(0);
+  });
+
+  it('a peer that starts out complete (seeding a finished download again) is not a completion', async () => {
+    const { share } = await newShare();
+    ann(share.id, pid(1), 'start', 0, 0);
+    ann(share.id, pid(1), 'complete');
+    ann(share.id, pid(1), 'update', 500, 0);
+    p2p.stats.flush();
+    expect(p2p.getShare(share.id)!.stats).toMatchObject({ completedDownloads: 0, peerBytes: 500 });
   });
 
   it('bounds remembered peers and completions per hour', async () => {

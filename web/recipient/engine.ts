@@ -28,6 +28,8 @@ export interface EngineSnapshot {
   webseedActive: boolean;
   peerBytes: number;
   webseedBytes: number;
+  /** Seeding files this browser downloaded on an earlier visit (see `resume`). */
+  resumed: boolean;
   error: string | null;
 }
 
@@ -57,6 +59,8 @@ export class Engine {
   private webseedBytes = 0;
   private smoothedDown = 0;
   private lock: { release: () => void } | null = null;
+  /** Set by `resume`: never download, only seed what the store already holds. */
+  private resuming = false;
   private readonly webseedAfterMs: number;
 
   /** Called on every state change and once per second while active. */
@@ -104,6 +108,31 @@ export class Engine {
 
   get selectedIndices(): readonly number[] {
     return this.selected;
+  }
+
+  /** Files this browser finished on an earlier visit whose pieces are still stored, or null. */
+  async resumable(): Promise<number[] | null> {
+    const files = loadSeeding(this.info);
+    if (!files) return null;
+    if (await hasStore(this.info.infoHash).catch(() => false)) return files;
+    forgetSeeding(this.info.infoHash);
+    return null;
+  }
+
+  /**
+   * Seeds `files` again from the browser's piece store (re-verified by WebTorrent). Downloads nothing:
+   * if the store no longer holds all of them, the torrent is dropped, the engine is idle again and
+   * this returns false.
+   */
+  async resume(files: number[]): Promise<boolean> {
+    if (this.phase !== 'idle') return false;
+    this.resuming = true;
+    await this.start(files);
+    const phase = this.phase as EnginePhase; // TS keeps the pre-await narrowing to 'idle'
+    if (phase === 'complete') return true;
+    if (phase === 'idle') forgetSeeding(this.info.infoHash);
+    this.resuming = false;
+    return false;
   }
 
   async start(selected: number[]): Promise<void> {
@@ -163,6 +192,10 @@ export class Engine {
 
     skipOwnedPiecesInRarestSearch(torrent);
     this.mapFiles(torrent);
+    if (this.resuming && !this.allSelectedDone()) {
+      this.dropTorrent();
+      return;
+    }
     for (const i of this.selected) {
       const f = this.fileMap[i];
       f?.select();
@@ -172,8 +205,26 @@ export class Engine {
     this.startedAt = Date.now();
     this.lastPeerDataAt = this.startedAt;
     this.phase = this.allSelectedDone() ? 'complete' : 'downloading';
+    if (this.phase === 'complete') rememberSeeding(this.info.infoHash, this.selected);
     this.timer = setInterval(() => this.tick(), 1000);
     this.tick();
+  }
+
+  /** Back to idle with the client kept (its peerId is on the live socket). The piece store stays. */
+  private dropTorrent(): void {
+    const t = this.torrent;
+    this.torrent = null;
+    try {
+      t?.destroy();
+    } catch {
+      /* ignore */
+    }
+    this.lock?.release();
+    this.lock = null;
+    this.fileMap = [];
+    this.selected = [];
+    this.phase = 'idle';
+    this.onChange();
   }
 
   private mapFiles(torrent: WtTorrent): void {
@@ -196,6 +247,7 @@ export class Engine {
 
     if (this.phase === 'downloading' && this.allSelectedDone()) {
       this.phase = 'complete';
+      rememberSeeding(this.info.infoHash, this.selected);
     }
     this.updateWebseed(t, now);
     this.onChange();
@@ -295,6 +347,7 @@ export class Engine {
       webseedActive: this.webseedAddedAt !== null,
       peerBytes: this.peerBytes,
       webseedBytes: this.webseedBytes,
+      resumed: this.resuming,
       error: this.error,
     };
   }
@@ -390,8 +443,52 @@ function describeError(err: unknown): string {
 // --- browser storage housekeeping ---------------------------------------------------------------
 // WebTorrent's default browser store keeps pieces in OPFS under `<name> - <infohash[0:8]>/`. Stores of
 // other shares are left behind when a tab closes; remove those that no open tab is using (Web Locks).
+// A finished download's store is kept until then, so reopening its link seeds it again (`resume`):
+// localStorage remembers which files were finished (infohash and file indices only, never the token).
 
 const LOCK_PREFIX = 'fileshare-store-';
+const SEEDING_PREFIX = 'fileshare.seeding.';
+
+function rememberSeeding(infoHash: string, files: readonly number[]): void {
+  try {
+    localStorage.setItem(SEEDING_PREFIX + infoHash.slice(0, 8), JSON.stringify({ infoHash, files }));
+  } catch {
+    /* storage disabled: no resume */
+  }
+}
+
+function forgetSeeding(infoHash: string): void {
+  try {
+    localStorage.removeItem(SEEDING_PREFIX + infoHash.slice(0, 8));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** The remembered file indices for this share, if they are valid for it. */
+export function loadSeeding(info: Pick<UnlockResponse, 'infoHash' | 'files'>): number[] | null {
+  try {
+    const raw = localStorage.getItem(SEEDING_PREFIX + info.infoHash.slice(0, 8));
+    if (!raw) return null;
+    const v = JSON.parse(raw) as { infoHash?: unknown; files?: unknown };
+    if (v.infoHash !== info.infoHash || !Array.isArray(v.files) || v.files.length === 0) return null;
+    const files = v.files as unknown[];
+    const ok = files.every((i) => Number.isInteger(i) && (i as number) >= 0 && (i as number) < info.files.length);
+    return ok && new Set(files).size === files.length ? (files as number[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function hasStore(infoHash: string): Promise<boolean> {
+  if (!navigator.storage?.getDirectory) return false;
+  const root = await navigator.storage.getDirectory();
+  const suffix = ` - ${infoHash.slice(0, 8)}`;
+  for await (const name of (root as unknown as { keys(): AsyncIterable<string> }).keys()) {
+    if (name.endsWith(suffix)) return true;
+  }
+  return false;
+}
 
 async function holdStoreLock(infoHash: string): Promise<{ release: () => void }> {
   const locks = navigator.locks;
@@ -424,5 +521,12 @@ async function cleanupOtherStores(infoHash: string): Promise<void> {
     if (inUse.has(LOCK_PREFIX + m[1])) continue;
     victims.push(name);
   }
-  for (const name of victims) await root.removeEntry(name, { recursive: true }).catch(() => {});
+  for (const name of victims) {
+    await root.removeEntry(name, { recursive: true }).catch(() => {});
+    try {
+      localStorage.removeItem(SEEDING_PREFIX + name.slice(-8));
+    } catch {
+      /* ignore */
+    }
+  }
 }

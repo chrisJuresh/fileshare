@@ -480,6 +480,9 @@ client → server:
 {"t":"stats","progress":0.42,"down":123456,"up":65432,"uploaded":104857600,"downloaded":2147483648,"done":false}
 {"t":"nick","nick":"Sam"}
 ```
+* `stats` may carry `"resumed":true`: the browser is seeding what it downloaded on an earlier visit
+  (§11), so its `done` is not a new completed download. Any other type for `resumed` drops the
+  message.
 * `hello` must come first, within 10 s. If the token is invalid, the socket closes with code 4401.
   If the share is gone, code 4404.
 * `stats` comes every 1–2 s. The server ignores more than 2 per second, and ignores values that are
@@ -505,7 +508,8 @@ server → client (every ~1.5 s, and on change):
 * Accounting: `peer_bytes` counts the increase of each peer's reported cumulative `uploaded`, and a
   completion counts once per peer id. The per-peer ledger is kept while the share is active (also
   across idle periods) and dropped when it becomes inactive. A tracker `completed` event counts
-  only if that peer announced `started`/an update before. Bounds per share: at most 1000
+  only if that peer announced `started`/an update with `left > 0` before (a client that starts out
+  complete is seeding, not downloading). A `stats` message with `resumed:true` never counts. Bounds per share: at most 1000
   remembered peers per map (oldest evicted) and at most 200 counted completions per rolling hour.
 * **No IPs anywhere in any message, log line at info level or DB row.**
 * **Privacy, inherent to P2P:** recipients in the same swarm see each other's IP addresses (WebRTC
@@ -594,6 +598,15 @@ in-flight webseed response for the item's shares before the files are removed.
 - `webSeeds: false` initially: add the webseed only when no peer has delivered data for ~10 s or no
   peer has the needed pieces, and remove it when peers return
 - Then `file.select()` for each ticked file
+- When the selected files are complete, localStorage remembers `{infoHash, files}` under
+  `fileshare.seeding.<infohash[0:8]>` (never the token). The OPFS piece store is kept until another
+  share's download clears it (stores no open tab holds a Web Lock on), which also drops the record.
+- Reopening the link (after unlocking) with such a record and its store present seeds again without
+  a click: the same files are added and re-verified, nothing is selected for download and no webseed
+  is added. If verification finds files incomplete, the torrent is dropped, the record forgotten and
+  the normal start screen shown. The stats socket then sends `resumed:true` (§8). Browsers cannot
+  seed once the tab is closed (WebRTC needs a live page; service workers cannot open peer
+  connections), so this is as far as browser seeding goes.
 - The torrent's rarity map is wrapped so the rarest-first search skips pieces we already have
   (WebTorrent 3.0.21 rescans every piece once per owned piece it picks; on a 10 GiB share that
   stalled peers with the main thread at 100 %)

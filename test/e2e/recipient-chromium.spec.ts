@@ -117,6 +117,34 @@ test.describe('P2P from the seeder', () => {
     await expect(page.locator('table.swarm tr.you')).toContainText('Synthetic Sam');
     expect(await page.evaluate(() => localStorage.getItem('fileshare.nick'))).toBe('Synthetic Sam');
   });
+
+  test('reopening the link after a finished download seeds it again without a click', async ({ page }) => {
+    await installHook(page);
+    await unlockAndDownload(page, mock, null);
+    await expect.poll(async () => (await hookState(page)).saved, { timeout: 60_000, intervals: [500] }).toBe(true);
+
+    // Same tab (the unlock is kept in sessionStorage): straight back to seeding from the stored pieces.
+    await page.reload();
+    await expect(page.getByText('You downloaded these files on an earlier visit.')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('heading', { name: 'All done' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Choose folder and download' })).toHaveCount(0);
+    const st = await hookState(page);
+    expect(st.done).toBe(true);
+    expect(st.peerBytes + st.webseedBytes).toBe(0); // nothing fetched again
+    await expect.poll(() => mock.stats.live.some((c) => c.stats?.done === true && c.stats.resumed === true)).toBe(true);
+
+    // Pieces gone (e.g. browser storage cleared): the normal screen, and nothing downloads by itself.
+    await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory();
+      for await (const name of (root as unknown as { keys(): AsyncIterable<string> }).keys()) {
+        if (/ - [0-9a-f]{8}$/.test(name)) await root.removeEntry(name, { recursive: true });
+      }
+    });
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Choose folder and download' })).toBeEnabled();
+    expect((await hookState(page)).done).toBe(false);
+    expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('fileshare.seeding.')))).toEqual([]);
+  });
 });
 
 test.describe('webseed fallback (no seeder)', () => {
