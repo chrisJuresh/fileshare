@@ -273,4 +273,64 @@ describe('web upload (tus)', () => {
     expect(getItem(set.id).append_batch_id).toBeNull();
     expect(refreshed).toEqual([set.id, set.id]);
   });
+
+  it('adds library items to a ready folder item: moved, unless they have links of their own', async () => {
+    const getItem = (id: string) => env.ctx.db.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow;
+    const x = randomBytes(70 * 1024 + 1);
+    const one = randomBytes(5000);
+    const p = randomBytes(300 * 1024);
+    const k = randomBytes(10);
+    const b1 = await newBatch();
+    await upload(base, x, { batchId: b1, relativePath: 'Set/x.bin', filename: 'x.bin' });
+    await upload(base, one, { batchId: b1, relativePath: 'one.bin', filename: 'one.bin' });
+    await upload(base, p, { batchId: b1, relativePath: 'Pics/p.bin', filename: 'p.bin' });
+    await upload(base, k, { batchId: b1, relativePath: 'kept.bin', filename: 'kept.bin' });
+    await upload(base, k, { batchId: b1, relativePath: 'x.bin', filename: 'x.bin' }); // clashes with Set/x.bin
+    const { itemIds } = (await (await fetch(`${base}/api/admin/uploads/batches/${b1}/complete`, { method: 'POST' })).json()) as { itemIds: string[] };
+    const byName = Object.fromEntries(itemIds.map((id) => [getItem(id).name, id])) as Record<string, string>;
+    const { Set: set, 'one.bin': oneId, Pics: pics, 'kept.bin': kept, 'x.bin': clash } = byName as Record<string, string>;
+    await waitFor(() => itemIds.every((id) => getItem(id).status === 'snapshotting'));
+    // only ready items, into a ready folder
+    await expect(ingest.addItems(set!, [oneId!])).rejects.toMatchObject({ statusCode: 409 });
+    runFakeBackup(env.ctx.db, env.ctx.config.paths.library, 'ok');
+    await waitFor(() => itemIds.every((id) => getItem(id).status === 'ready'));
+    await expect(ingest.addItems(set!, [])).rejects.toMatchObject({ statusCode: 400 });
+    await expect(ingest.addItems(set!, [set!])).rejects.toMatchObject({ statusCode: 400, message: /itself/ });
+    await expect(ingest.addItems(oneId!, [kept!])).rejects.toMatchObject({ statusCode: 409, message: /folder/ });
+    await expect(ingest.addItems(set!, ['c'.repeat(26)])).rejects.toMatchObject({ statusCode: 404 });
+    await expect(ingest.addItems(set!, [oneId!, clash!])).rejects.toMatchObject({ statusCode: 409, message: /already exists/ });
+    expect(getItem(set!).status).toBe('ready');
+    expect(getItem(oneId!).status).toBe('ready');
+    expect(readdirSync(env.ctx.config.paths.staging)).toEqual([]);
+
+    // kept.bin has an active link of its own: it stays an item; the others are moved.
+    const now = Date.now();
+    env.ctx.db
+      .prepare('INSERT INTO shares (id, item_id, info_hash, torrent_name, info, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('share-synthetic', kept, 'a'.repeat(40), 'kept.bin', Buffer.from('x'), now, now);
+    const r = await ingest.addItems(set!, [oneId!, pics!, kept!]);
+    expect(r).toEqual({ removed: [oneId, pics].sort(), kept: [kept] });
+    expect(getItem(oneId!).status).toBe('deleted');
+    expect(getItem(pics!).status).toBe('deleted');
+    expect(getItem(kept!).status).toBe('ready');
+    await waitFor(() => getItem(set!).status === 'snapshotting');
+    expect(refreshed).toEqual([set]);
+
+    const row = getItem(set!);
+    expect(parseInfo(row.info!).files.map((f) => f.path)).toEqual(['x.bin', 'Pics/p.bin', 'kept.bin', 'one.bin']);
+    expect(row.file_count).toBe(4);
+    const lib = env.ctx.config.paths.library;
+    expect(readFileSync(path.join(lib, 'Set', 'one.bin')).equals(one)).toBe(true);
+    expect(readFileSync(path.join(lib, 'Set', 'Pics', 'p.bin')).equals(p)).toBe(true);
+    expect(existsSync(path.join(lib, 'one.bin'))).toBe(false);
+    expect(existsSync(path.join(lib, 'Pics'))).toBe(false);
+    // the kept item and its copy in the folder are one file on disk (hard link)
+    expect(statSync(path.join(lib, 'Set', 'kept.bin')).ino).toBe(statSync(path.join(lib, 'kept.bin')).ino);
+    expect(readdirSync(env.ctx.config.paths.staging)).toEqual([]);
+
+    runFakeBackup(env.ctx.db, lib, 'ok');
+    await waitFor(() => getItem(set!).status === 'ready');
+    // now kept.bin is in the folder: adding it again is a clash
+    await expect(ingest.addItems(set!, [kept!])).rejects.toMatchObject({ statusCode: 409, message: /already exists/ });
+  });
 });

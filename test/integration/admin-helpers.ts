@@ -14,7 +14,7 @@ import type { AppContext } from '../../src/context.js';
 import { AppEvents } from '../../src/core/events.js';
 import { newId, newShareId } from '../../src/core/ids.js';
 import { openDb, type ShareRow, type ShareStatsRow } from '../../src/db/index.js';
-import type { IngestService } from '../../src/ingest/index.js';
+import type { AddItemsResult, IngestService } from '../../src/ingest/index.js';
 import { createLogger } from '../../src/log.js';
 import type { P2PService } from '../../src/p2p/index.js';
 import { buildAdminServer } from '../../src/server/admin.js';
@@ -97,6 +97,10 @@ export class FakeIngest implements IngestService {
   }
   async addFiles(itemId: string, batchId: string): Promise<void> {
     this.calls.push({ method: 'addFiles', args: [itemId, batchId] });
+  }
+  async addItems(itemId: string, sourceIds: string[]): Promise<AddItemsResult> {
+    this.calls.push({ method: 'addItems', args: [itemId, sourceIds] });
+    return { removed: [...sourceIds].sort(), kept: [] };
   }
   async registerAdminRoutes(app: FastifyInstance): Promise<void> {
     app.addContentTypeParser('application/offset+octet-stream', (_req, _payload, done) => done(null));

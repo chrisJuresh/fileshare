@@ -39,10 +39,22 @@ export interface IngestService {
   deleteItem(itemId: string): Promise<void>;
   /** Append the files of an open upload batch to a ready folder item (§4 "add files"). */
   addFiles(itemId: string, batchId: string): Promise<void>;
+  /**
+   * Append other ready library items to a ready folder item (§4 "add items"). Sources without
+   * active links of their own are then deleted (a move); the others are kept.
+   */
+  addItems(itemId: string, sourceIds: string[]): Promise<AddItemsResult>;
   /** tus endpoint + upload batch routes under /api/admin/uploads (admin listener only). */
   registerAdminRoutes(app: FastifyInstance): Promise<void>;
   /** itemId → 0..1 for items currently hashing. */
   progress(): Record<string, number>;
+}
+
+export interface AddItemsResult {
+  /** Source items deleted after being added (sorted ids). */
+  removed: string[];
+  /** Source items kept because they have active links of their own (sorted ids). */
+  kept: string[];
 }
 
 export type IngestDeps = { p2p: Pick<P2PService, 'revokeAllForItem' | 'repointItem' | 'refreshItemShares'> };
@@ -268,6 +280,13 @@ class Ingest implements IngestService {
       if (this.locks.get(id) === tail) this.locks.delete(id);
     });
     return run;
+  }
+
+  /** Serialise work on several items. Locks are taken in id order, so two callers cannot deadlock. */
+  private withLocks<T>(ids: string[], fn: () => Promise<T>): Promise<T> {
+    const [first, ...rest] = [...new Set(ids)].sort();
+    if (first === undefined) return fn();
+    return this.withLock(first, () => this.withLocks(rest, fn));
   }
 
   /** Run a periodic job, skipping if the previous run is still going. */
@@ -688,9 +707,7 @@ class Ingest implements IngestService {
     if (typeof batchId !== 'string' || !/^[a-z2-7]{26}$/.test(batchId)) throw new IngestError(400, 'invalid upload round id');
     await this.withLock(itemId, async () => {
       const row = this.getItem(itemId);
-      if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
-      if (row.kind !== 'dir') throw new IngestError(409, 'files can only be added to a folder item');
-      if (row.status !== 'ready' || !row.info) throw new IngestError(409, 'files can be added once the item is ready');
+      this.assertAppendable(row, 'files');
       const batch = this.db.prepare('SELECT status FROM upload_batches WHERE id = ?').get(batchId) as { status: string } | undefined;
       if (!batch) throw new IngestError(404, 'upload round not found');
       if (batch.status !== 'open') throw new IngestError(409, 'this upload round was already used; start a new upload');
@@ -699,46 +716,141 @@ class Ingest implements IngestService {
         throw new IngestError(400, 'no finished files in this upload round yet; finish or retry the uploads, then try again');
       }
       if (staged.special.length > 0) throw new IngestError(400, 'the upload contains special files');
-      // Planning also checks the stored info is a folder torrent we can extend.
-      try {
-        planAppend(row.info);
-      } catch (err) {
-        throw new IngestError(409, (err as Error).message);
-      }
-      const lib = this.libraryPath(row.name);
-      for (const f of staged.files) {
-        for (let i = 1; i <= f.segs.length; i++) {
-          let st;
-          try {
-            st = await lstat(safeJoin(lib, ...f.segs.slice(0, i)));
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
-            throw err;
-          }
-          if (i === f.segs.length || !st.isDirectory()) {
-            throw new IngestError(409, `“${f.segs.slice(0, i).join('/')}” already exists in “${row.name}”; rename the new file and upload it again`);
-          }
-        }
-      }
+      await this.assertNoClash(row, staged.files, 'rename the new file and upload it again');
       // Close the batch first: later tus finishes for it are rejected.
       const r = this.db
         .prepare("UPDATE upload_batches SET status = 'ingested', updated_at = ? WHERE id = ? AND status = 'open'")
         .run(Date.now(), batchId);
       if (r.changes === 0) throw new IngestError(409, 'this upload round was already used; start a new upload');
       try {
-        if (!this.transition(itemId, ['ready'], 'hashing', { append_batch_id: batchId, library_at: Date.now(), error: null })) {
-          throw new IngestError(409, 'the item changed; try again');
-        }
+        this.startAppend(itemId, batchId);
       } catch (err) {
         this.db.prepare("UPDATE upload_batches SET status = 'open', updated_at = ? WHERE id = ?").run(Date.now(), batchId);
-        // items_active_source: a new outbox entry with this item's source name is being ingested.
-        if (/UNIQUE constraint failed/.test((err as Error).message)) {
-          throw new IngestError(409, 'a new copy of this item is being ingested from the PC outbox; try again once it is done');
-        }
         throw err;
       }
       this.log.info({ itemId, batchId, files: staged.files.length }, 'adding files to item');
       this.enqueueHash(itemId);
+    });
+  }
+
+  /** 409 if a file (or a non-folder on its path) already exists in the folder item `row`. */
+  private async assertNoClash(row: ItemRow, files: { segs: string[] }[], hint: string): Promise<void> {
+    const lib = this.libraryPath(row.name);
+    for (const f of files) {
+      for (let i = 1; i <= f.segs.length; i++) {
+        let st;
+        try {
+          st = await lstat(safeJoin(lib, ...f.segs.slice(0, i)));
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+          throw err;
+        }
+        if (i === f.segs.length || !st.isDirectory()) {
+          throw new IngestError(409, `“${f.segs.slice(0, i).join('/')}” already exists in “${row.name}”; ${hint}`);
+        }
+      }
+    }
+  }
+
+  /** Check that `row` is a ready folder item whose torrent can be extended. */
+  private assertAppendable(row: ItemRow | undefined, what: string): asserts row is ItemRow {
+    if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
+    if (row.kind !== 'dir') throw new IngestError(409, `${what} can only be added to a folder item`);
+    if (row.status !== 'ready' || !row.info) throw new IngestError(409, `${what} can be added once the item is ready`);
+    // Planning also checks the stored info is a folder torrent we can extend.
+    try {
+      planAppend(row.info);
+    } catch (err) {
+      throw new IngestError(409, (err as Error).message);
+    }
+  }
+
+  /** ready → hashing in append mode. The append batch row must exist and be closed already. */
+  private startAppend(itemId: string, batchId: string): void {
+    try {
+      if (!this.transition(itemId, ['ready'], 'hashing', { append_batch_id: batchId, library_at: Date.now(), error: null })) {
+        throw new IngestError(409, 'the item changed; try again');
+      }
+    } catch (err) {
+      // items_active_source: a new outbox entry with this item's source name is being ingested.
+      if (/UNIQUE constraint failed/.test((err as Error).message)) {
+        throw new IngestError(409, 'a new copy of this item is being ingested from the PC outbox; try again once it is done');
+      }
+      throw err;
+    }
+  }
+
+  // ---------------------------------------------------------------- add items (append other library items)
+
+  async addItems(itemId: string, sourceIds: string[]): Promise<AddItemsResult> {
+    if (!Array.isArray(sourceIds) || sourceIds.length === 0) throw new IngestError(400, 'choose at least one item to add');
+    const ids = [...new Set(sourceIds)].sort();
+    if (ids.includes(itemId)) throw new IngestError(400, 'an item cannot be added to itself');
+    return this.withLocks([itemId, ...ids], async () => {
+      const row = this.getItem(itemId);
+      this.assertAppendable(row, 'items');
+      const sources: { row: ItemRow; scan: TreeScan }[] = [];
+      for (const id of ids) {
+        const src = this.getItem(id);
+        if (!src || src.status === 'deleted') throw new IngestError(404, 'item not found');
+        if (src.status !== 'ready') throw new IngestError(409, `“${src.name}” can be added once it is ready`);
+        const scan = await scanTree(this.libraryPath(src.name));
+        if (scan.kind !== 'file' && scan.kind !== 'dir') throw new IngestError(409, `the library copy of “${src.name}” is missing`);
+        if (scan.special.length > 0) throw new IngestError(409, `“${src.name}” contains symlinks or special files`);
+        // Added files must pass the upload name rules (placeAppend checks them again).
+        for (const seg of [src.name, ...scan.files.flatMap((f) => f.segs)]) {
+          try {
+            validateSegment(seg, { forUpload: true });
+          } catch (err) {
+            throw new IngestError(409, `“${src.name}” contains a name that cannot be added to a folder (${(err as Error).message})`);
+          }
+        }
+        sources.push({ row: src, scan });
+      }
+      // A file item lands as <folder>/<name>, a folder item as <folder>/<name>/**.
+      await this.assertNoClash(
+        row,
+        sources.map((s) => ({ segs: [s.row.name] })),
+        'rename one of them first',
+      );
+
+      const batchId = newId();
+      const stage = safeJoin(this.cfg.paths.staging, batchId);
+      try {
+        for (const s of sources) await hardlinkTree(this.libraryPath(s.row.name), safeJoin(stage, s.row.name), s.scan);
+        const now = Date.now();
+        this.db.transaction(() => {
+          this.db.prepare("INSERT INTO upload_batches (id, status, created_at, updated_at) VALUES (?, 'ingested', ?, ?)").run(batchId, now, now);
+          this.startAppend(itemId, batchId);
+        })();
+      } catch (err) {
+        await rm(stage, { recursive: true, force: true });
+        if (err instanceof PlacementError) throw new IngestError(409, err.message);
+        throw err;
+      }
+      this.log.info({ itemId, batchId, items: sources.length }, 'adding items to item');
+      this.enqueueHash(itemId);
+
+      // The files now live on in the folder (hard links). Sources with links of their own stay.
+      const activeShares = this.db.prepare(
+        'SELECT 1 FROM shares WHERE item_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) LIMIT 1',
+      );
+      const result: AddItemsResult = { removed: [], kept: [] };
+      for (const s of sources) {
+        if (activeShares.get(s.row.id, Date.now())) {
+          result.kept.push(s.row.id);
+          continue;
+        }
+        try {
+          await this.deleteLocked(s.row.id);
+          result.removed.push(s.row.id);
+        } catch (err) {
+          // The append is under way; a leftover original is harmless (delete it by hand).
+          this.log.error({ itemId: s.row.id, err: errCode(err) }, 'removing an added item failed');
+          result.kept.push(s.row.id);
+        }
+      }
+      return result;
     });
   }
 
@@ -972,25 +1084,28 @@ class Ingest implements IngestService {
     this.aborts.get(itemId)?.abort();
     this.hashQueue = this.hashQueue.filter((x) => x !== itemId);
     this.stab.delete(itemId);
-    await this.withLock(itemId, async () => {
-      const row = this.getItem(itemId);
-      if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
-      await this.assertDeletable(row);
-      await this.deps.p2p.revokeAllForItem(itemId);
-      // The name is reserved for this item, so anything at its library path is ours.
-      await rm(this.libraryPath(row.name), { recursive: true, force: true });
-      if (row.source === 'upload' && row.library_at === null && row.upload_batch_id) {
-        await rm(safeJoin(this.cfg.paths.staging, row.upload_batch_id, row.source_name), { recursive: true, force: true });
-      }
-      if (row.append_batch_id !== null) {
-        await rm(safeJoin(this.cfg.paths.staging, row.append_batch_id), { recursive: true, force: true });
-      }
-      const all: ItemStatus[] = ['incoming', 'stabilising', 'hashing', 'snapshotting', 'ready', 'error'];
-      // The row keeps a tombstone name so the real name can be used again by a new item.
-      if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now(), name: tombstoneName(row.name, itemId) })) return;
-      this.ctx.events.emit('item.deleted', { itemId });
-      requestSnapshot(this.db, 'delete', itemId);
-    });
+    await this.withLock(itemId, () => this.deleteLocked(itemId));
+  }
+
+  /** Revoke links, remove the library copy, tombstone the row. Runs under the item lock. */
+  private async deleteLocked(itemId: string): Promise<void> {
+    const row = this.getItem(itemId);
+    if (!row || row.status === 'deleted') throw new IngestError(404, 'item not found');
+    await this.assertDeletable(row);
+    await this.deps.p2p.revokeAllForItem(itemId);
+    // The name is reserved for this item, so anything at its library path is ours.
+    await rm(this.libraryPath(row.name), { recursive: true, force: true });
+    if (row.source === 'upload' && row.library_at === null && row.upload_batch_id) {
+      await rm(safeJoin(this.cfg.paths.staging, row.upload_batch_id, row.source_name), { recursive: true, force: true });
+    }
+    if (row.append_batch_id !== null) {
+      await rm(safeJoin(this.cfg.paths.staging, row.append_batch_id), { recursive: true, force: true });
+    }
+    const all: ItemStatus[] = ['incoming', 'stabilising', 'hashing', 'snapshotting', 'ready', 'error'];
+    // The row keeps a tombstone name so the real name can be used again by a new item.
+    if (!this.transition(itemId, all, 'deleted', { deleted_at: Date.now(), name: tombstoneName(row.name, itemId) })) return;
+    this.ctx.events.emit('item.deleted', { itemId });
+    requestSnapshot(this.db, 'delete', itemId);
   }
 
   // ---------------------------------------------------------------- uploads

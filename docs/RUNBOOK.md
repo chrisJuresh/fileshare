@@ -294,6 +294,14 @@ A new file can't have the same name as something already in the folder: rename i
 again. Single-file items can't have files added. Put the file in a folder and share that instead.
 If an add fails (status Error), **Retry** picks up where it stopped.
 
+**Files already in the library** (e.g. uploaded as separate items, or synced from the PC outbox)
+don't need uploading again: drag the item's row onto the folder's row in **Library**, or onto the
+share's row in **Shares** (hover over the Shares tab while dragging to switch to it). Keyboard:
+**Add from library** on the folder row (Library) or the share row (Shares). The added items are
+**moved** into the folder: they disappear from the library as separate items, unless they have an
+active link of their own, in which case they stay so that link keeps working (the files are hard
+links, so keeping them costs no disk space). Recipients see the same as for **Add files** above.
+
 ### Recipient locked out of a password share
 
 Wrong passwords are limited to 5 per 10 minutes per recipient and 50 per hour per share (§7.1 in

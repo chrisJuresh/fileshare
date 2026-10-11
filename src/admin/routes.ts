@@ -34,6 +34,7 @@ const expiresAt = z
 
 const RenameBody = z.object({ name: z.string().min(1).max(1000) }).strict();
 const AddFilesBody = z.object({ batchId: z.string().regex(/^[a-z2-7]{26}$/) }).strict();
+const AddItemsBody = z.object({ itemIds: z.array(idParam.shape.id).min(1).max(100) }).strict();
 const EmptyBody = z.object({}).strict().optional();
 const CreateShareBody = z
   .object({ itemId: z.string().min(1).max(64), password: password.optional(), expiresAt: expiresAt.optional() })
@@ -122,6 +123,15 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     if (!getItemRow(db, id)) throw new HttpError(404, 'not_found');
     await ingest.addFiles(id, body.batchId);
     return { ok: true };
+  });
+
+  // Append other ready library items to a ready folder item. Originals without links of their own
+  // are removed (a move); the response says which were removed and which were kept.
+  api.post('/items/:id/add-items', async (req) => {
+    const { id } = parse(idParam, req.params);
+    const body = parse(AddItemsBody, req.body);
+    if (!getItemRow(db, id)) throw new HttpError(404, 'not_found');
+    return await ingest.addItems(id, body.itemIds);
   });
 
   api.get('/items/:id/files', async (req) => {

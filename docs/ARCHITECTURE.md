@@ -354,6 +354,26 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INT
   `append_batch_id` goes back to `hashing`. Such an item can always be deleted (its outbox entry is
   long gone), and deleting it also removes the staging batch. Single-file items can't have files
   added (409): turning them into a folder would change every path.
+* **add items** (`POST /api/admin/items/:id/add-items {itemIds}`): other `ready` library items are
+  appended to a `ready` folder item through the same append pipeline (the dashboard's drag and
+  drop / "Add from library"). A file item lands as `<folder>/<name>`, a folder item as
+  `<folder>/<name>/**`.
+  1. Under the locks of the target and every source (taken in id order): the target passes the
+     "add files" checks; each source exists (404), is `ready` and on disk (409), contains no
+     symlinks/special files and only names allowed for uploads (409); no source name exists in the
+     target (409); the target is not among the sources (400).
+  2. Hard-link each source's library copy into a new `staging/<batch>/<name>` (no data copied),
+     then in one transaction insert the batch row as `ingested` and do `ready → hashing` with
+     `append_batch_id = <batch>`. On any failure the staging dir is removed and nothing changes.
+     From here it is "add files" step 2 onwards.
+  3. **Move semantics:** each source without an active share of its own (not revoked, not expired)
+     is then deleted like `deleteItem` (its inactive shares are revoked; its files live on in the
+     folder via the hard links). Sources with an active share are kept so their links keep
+     working. The response is `{removed: string[], kept: string[]}`. If a delete fails, the item is
+     reported as kept and the add goes on.
+
+  A crash between steps 1 and 2 can leave an orphan `staging/<batch>` of hard links (no batch row);
+  it holds no extra data while the sources exist and can be removed by hand.
 
 ## 5. Snapshots (restic runner)
 
@@ -478,6 +498,7 @@ equal to `ADMIN_BASE_URL`.
 | DELETE | `/api/admin/items/:id` | admin→ingest | delete item (revokes shares). 409 for an outbox item that is not ready (an `error` one: while its outbox entry exists), see §4 |
 | POST | `/api/admin/items/:id/retry` | admin→ingest | retry after error |
 | POST | `/api/admin/items/:id/add-files` | admin→ingest | `{batchId}`: append the files of an open upload batch to a ready folder item (§4 "add files"). 400 bad id / empty batch, 404 unknown item or batch, 409 not a ready folder item, batch not open, or a name already exists in the item. |
+| POST | `/api/admin/items/:id/add-items` | admin→ingest | `{itemIds: string[1..100]}`: append other ready library items to a ready folder item (§4 "add items"). → `{removed, kept}` (source ids deleted after the add / kept because they have active links). 400 bad ids / target among the sources, 404 unknown item, 409 target not a ready folder item, a source not ready, or a name already exists in the target. |
 | GET | `/api/admin/items/:id/files` | admin | `{path,length}[]` (BEP 47 pad files left out) |
 | GET | `/api/admin/shares` | admin | `ShareDto[]` (incl. stats) |
 | POST | `/api/admin/shares` | admin→p2p | `{itemId, password?: string, expiresAt?: number}` → `ShareDto` (incl. `url`) |
@@ -755,6 +776,7 @@ interface IngestService {
   renameItem(itemId: string, newName: string): Promise<void>;
   deleteItem(itemId: string): Promise<void>;          // calls p2p.revokeAllForItem first
   addFiles(itemId: string, batchId: string): Promise<void>; // §4 "add files"
+  addItems(itemId: string, sourceIds: string[]): Promise<{ removed: string[]; kept: string[] }>; // §4 "add items"
   registerAdminRoutes(app: FastifyInstance): Promise<void>; // tus + upload batch routes
   progress(): Record<string, number>;                  // itemId → 0..1 while hashing
 }

@@ -146,6 +146,19 @@ describe('items', () => {
     expect(h.ingest.calls).toEqual([{ method: 'addFiles', args: [a, batchId] }]);
   });
 
+  it('adds library items to a folder item (validates the id list)', async () => {
+    const a = insertItem(h.ctx, { status: 'ready' });
+    const b = insertItem(h.ctx, { status: 'ready' });
+    expect((await call('POST', `/api/admin/items/${a}/add-items`, { itemIds: [] })).statusCode).toBe(400);
+    expect((await call('POST', `/api/admin/items/${a}/add-items`, { itemIds: ['../x'] })).statusCode).toBe(400);
+    expect((await call('POST', `/api/admin/items/${a}/add-items`, { itemIds: [b], extra: 1 })).statusCode).toBe(400);
+    expect((await call('POST', '/api/admin/items/unknown/add-items', { itemIds: [b] })).statusCode).toBe(404);
+    const ok = await call('POST', `/api/admin/items/${a}/add-items`, { itemIds: [b] });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ removed: [b], kept: [] });
+    expect(h.ingest.calls).toEqual([{ method: 'addItems', args: [a, [b]] }]);
+  });
+
   it('lists files of single- and multi-file items', async () => {
     const single = insertItem(h.ctx, {
       kind: 'file',
