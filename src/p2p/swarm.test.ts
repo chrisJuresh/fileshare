@@ -25,7 +25,7 @@ let item: MadeItem;
 
 beforeAll(async () => {
   env = await makeEnv();
-  srv = await startPublic(env, { live: { helloTimeoutMs: 300, lingerMs: 400 }, tickIntervalMs: 100 });
+  srv = await startPublic(env, { live: { helloTimeoutMs: 300, lingerMs: 400, statsStaleMs: 1500 }, tickIntervalMs: 100 });
   p2p = srv.p2p;
   item = await makeItem(env.ctx, 'live', [{ rel: 'f.bin', size: 100_000 }]);
 });
@@ -221,6 +221,60 @@ describe('live stats socket', () => {
     await waitFor(() => a.last()?.peers.length === 4);
     b2.ws.close();
     a.ws.close();
+  });
+
+  it('a socket that stops sending stats (a frozen phone tab) loses its rows until its next stats', async () => {
+    const { share, token } = await newShare();
+    const a = await connect(share.id);
+    a.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_A }));
+    const b = await connect(share.id);
+    b.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_B, nick: 'Synthetic Phone' }));
+    p2p.stats.onAnnounce({ shareId: share.id, peerId: PEER_B, type: 'ws', event: 'update', left: 1, uploaded: 0, downloaded: 0 });
+    const keepA = setInterval(() => a.ws.send(JSON.stringify({ t: 'stats', progress: 0, down: 0, up: 0, uploaded: 0, downloaded: 0, done: false })), 300);
+    try {
+      await waitFor(() => a.last()?.peers.some((r) => r.label === 'Synthetic Phone'));
+      // B goes quiet: after statsStaleMs (+ the linger) neither its socket nor its tracker row shows.
+      await waitFor(() => a.last()?.peers.length === 2 && !a.last()!.peers.some((r) => r.label === 'Synthetic Phone'), 5000);
+      b.ws.send(JSON.stringify({ t: 'stats', progress: 0.25, down: 0, up: 0, uploaded: 0, downloaded: 0, done: false }));
+      await waitFor(() => a.last()?.peers.some((r) => r.label === 'Synthetic Phone' && r.progress === 0.25));
+    } finally {
+      clearInterval(keepA);
+      a.ws.close();
+      b.ws.close();
+    }
+  });
+
+  it("a torrent app's connection under a different peer id than its announce shows on the app's row", async () => {
+    const { share } = await newShare();
+    const hex = (s: string) => Buffer.from(s).toString('hex');
+    const announced = hex('-LT2110-announce0001');
+    p2p.stats.onAnnounce({ shareId: share.id, peerId: announced, type: 'http', event: 'start', left: 0, uploaded: 0, downloaded: 0, name: 'Synthetic Sam' });
+    const wire = (peerId: string) => ({
+      type: 'tcpIncoming',
+      peerId,
+      uploaded: 0,
+      downloaded: 0,
+      uploadSpeed: () => 2048,
+      downloadSpeed: () => 0,
+      peerPieces: { get: () => true },
+    });
+    const wires = [wire(hex('-LT2110-connection01')), wire(hex('-qB5010-unannounced1'))];
+    const torrent = { pieces: [1, 2, 3], wires, uploadSpeed: 0 };
+    const fake = { peerId: hex('-WW0300-serverpeer01'), torrent: () => torrent, shareIds: () => [], remove: async () => {}, stop: async () => {} };
+    (p2p as unknown as { seeder: unknown }).seeder = fake;
+    try {
+      const rows = p2p.swarm(share.id)!.peers.filter((r) => r.kind === 'client');
+      expect(rows).toEqual([expect.objectContaining({ label: 'Synthetic Sam', progress: 1, down: 2048 })]);
+      // Two announced apps of the same client: the connection can't be told apart and gets no row.
+      p2p.stats.onAnnounce({ shareId: share.id, peerId: hex('-LT2110-announce0002'), type: 'http', event: 'start', left: 0, uploaded: 0, downloaded: 0 });
+      const two = p2p.swarm(share.id)!.peers.filter((r) => r.kind === 'client');
+      expect(two.map((r) => [r.label, r.down])).toEqual([
+        ['Synthetic Sam', 0],
+        ['Torrent client', 0],
+      ]);
+    } finally {
+      (p2p as unknown as { seeder: unknown }).seeder = undefined;
+    }
   });
 
   it('closes 4401 when the password changes and 4404 when revoked', async () => {

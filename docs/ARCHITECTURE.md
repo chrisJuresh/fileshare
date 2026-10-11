@@ -525,7 +525,14 @@ server → client (every ~1.5 s, and on change):
 * `id` is an opaque per-share counter, never an IP and never the peerId.
 * Browser rows without a nick are labelled "Friend N".
 * Torrent-client rows take progress from the seeder's `wire.peerPieces` bitfield when connected,
-  otherwise from the tracker announce's `left`.
+  otherwise from the tracker announce's `left`. libtorrent-based apps (qBittorrent, Deluge, …)
+  connect with a different random peer id than they announce with. The server never dials out and
+  there is no DHT/PEX, so every torrent app has announced. A connection under a peer id that never
+  announced is therefore put on the row of the one announced app with the same client prefix
+  (peer-id bytes 1–8, e.g. `-qB5010-`), or gets no row when there is none or more than one.
+* A live socket that sent no `stats` for 90 s (a frozen background tab, a phone that slept) has no row
+  of its own, and its tracker row is hidden too; it is back with its next `stats`. A WebRTC wire
+  from it still shows while connected.
 * Peers that disconnect are removed after 30 s (so a network blip doesn't make them flicker). A
   browser whose page was closed or reloaded is removed at once: its live socket closes with 1001
   ("going away"), and its WebRTC wire and tracker rows are hidden while they wind down (a reload comes

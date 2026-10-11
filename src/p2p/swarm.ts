@@ -13,6 +13,9 @@ import { shareState, type ShareStore } from './shares.js';
 import type { AnnounceInfo } from './tracker.js';
 
 export const LINGER_MS = 30_000;
+/** A live socket that sent no stats for this long (a frozen background tab, a phone that slept) has no
+ * row of its own; it is back with its next stats. Hidden pages throttle timers to ~1/min. */
+export const STATS_STALE_MS = 90_000;
 const HELLO_TIMEOUT_MS = 10_000;
 const MAX_STATS_PER_SEC = 2;
 const MAX_MSGS_PER_SEC = 20;
@@ -26,6 +29,16 @@ export const MAX_PEERS_PER_SHARE = 1000;
 /** Per-share bound on counted completions per rolling hour (announce/stats spam can't inflate it). */
 export const MAX_COMPLETIONS_PER_HOUR = 200;
 const HOUR_MS = 3600_000;
+
+/** Bytes 1-8 of a peer id name the client and version (`-qB5010-`, `-LT2110-`, `M7-4-0--`). */
+const CLIENT_PREFIX_HEX = 16;
+
+/** The one announced torrent app whose peer id has the same client prefix, if exactly one. */
+function announcedApp(wirePid: string, httpPids: string[]): string | undefined {
+  const prefix = wirePid.slice(0, CLIENT_PREFIX_HEX);
+  const same = httpPids.filter((pid) => pid.startsWith(prefix));
+  return same.length === 1 ? same[0] : undefined;
+}
 
 /** Make room for one new key: drop the oldest (first-inserted) entries until size < max. */
 function evictOldest(m: Map<string, unknown> | Set<string>, max: number): void {
@@ -59,6 +72,8 @@ interface BrowserState {
   up: number;
   uploaded: number;
   done: boolean;
+  /** Time of the hello or the last stats message. */
+  lastStats: number;
   socket?: LiveSocket;
 }
 
@@ -138,6 +153,7 @@ class ShareSwarm {
 export interface SwarmTimings {
   helloTimeoutMs: number;
   lingerMs: number;
+  statsStaleMs: number;
 }
 
 export interface SwarmDeps {
@@ -161,7 +177,7 @@ export class SwarmStats {
     private readonly now: () => number = Date.now,
   ) {
     this.log = ctx.log.child({ mod: 'swarm' });
-    this.timings = { helloTimeoutMs: HELLO_TIMEOUT_MS, lingerMs: LINGER_MS, ...timings };
+    this.timings = { helloTimeoutMs: HELLO_TIMEOUT_MS, lingerMs: LINGER_MS, statsStaleMs: STATS_STALE_MS, ...timings };
   }
 
   private state(shareId: string): ShareSwarm {
@@ -347,7 +363,7 @@ export class SwarmStats {
       s.browsers.get(peerId)?.nick ?? s.announced.get(peerId)?.name ?? (kind === 'client' ? 'Torrent client' : `Friend ${s.n(peerId)}`);
 
     for (const b of s.browsers.values()) {
-      if (!b.socket) continue;
+      if (!b.socket || now - b.lastStats > this.timings.statsStaleMs) continue;
       current.set(b.peerId, {
         id: `p${s.n(b.peerId)}`,
         label: label(b.peerId, 'browser'),
@@ -359,11 +375,16 @@ export class SwarmStats {
       });
     }
     const wirePids = new Set<string>();
-    for (const w of torrent?.wires ?? []) {
-      const pid = w.peerId;
-      if (pid) wirePids.add(pid);
-      if (!pid || pid === spid || w.type === 'webSeed' || current.has(pid) || s.departed.has(pid)) continue;
+    const wires = (torrent?.wires ?? []).filter((w) => w.peerId && w.peerId !== spid && w.type !== 'webSeed');
+    for (const w of wires) wirePids.add(w.peerId!);
+    const httpPids = [...s.announced].filter(([pid, a]) => a.type === 'http' && !wirePids.has(pid)).map(([pid]) => pid);
+    for (const w of wires) {
       const kind = w.type === 'webrtc' ? 'browser' : 'client';
+      // libtorrent (qBittorrent, Deluge, ...) connects with a different random peer id than it
+      // announces with. Every torrent app announces (no DHT/PEX), so a connection under an unknown
+      // peer id belongs to the one announced app with the same client prefix, or gets no row.
+      const pid = kind === 'client' && !s.announced.has(w.peerId!) ? announcedApp(w.peerId!, httpPids) : w.peerId!;
+      if (!pid || current.has(pid) || s.departed.has(pid)) continue;
       const ann = s.announced.get(pid);
       current.set(pid, {
         id: `p${s.n(pid)}`,
@@ -381,6 +402,8 @@ export class SwarmStats {
         continue;
       }
       if (pid === spid || current.has(pid) || s.departed.has(pid)) continue;
+      // A frozen page's tracker socket stays open as long as its live socket does: hidden alike.
+      if (s.browsers.get(pid)?.socket) continue;
       const kind = a.type === 'ws' ? 'browser' : 'client';
       const progress = total > 0 && Number.isFinite(a.left) ? Math.min(1, Math.max(0, 1 - a.left / total)) : a.left === 0 ? 1 : 0;
       current.set(pid, { id: `p${s.n(pid)}`, label: label(pid, kind), kind, progress, down: 0, up: 0, uploaded: a.uploaded });
@@ -570,8 +593,9 @@ export class SwarmStats {
         s.departed.delete(peerId);
         const prev = s.browsers.get(peerId);
         if (prev?.socket && prev.socket !== sock) prev.socket.close(1000, 'replaced');
-        peer = prev ?? { peerId, progress: 0, down: 0, up: 0, uploaded: 0, done: false };
+        peer = prev ?? { peerId, progress: 0, down: 0, up: 0, uploaded: 0, done: false, lastStats: now };
         peer.socket = sock;
+        peer.lastStats = now;
         const nick = sanitizeNick(msg.nick);
         if (nick) peer.nick = nick;
         s.browsers.set(peerId, peer);
@@ -586,6 +610,7 @@ export class SwarmStats {
         const { progress, down, up, uploaded, downloaded, done, resumed } = msg;
         if (![progress, down, up, uploaded, downloaded].every(finiteNonNeg) || typeof done !== 'boolean') return;
         if (resumed !== undefined && typeof resumed !== 'boolean') return;
+        peer.lastStats = now;
         peer.progress = Math.min(1, progress);
         peer.down = Math.min(down, MAX_NUM);
         peer.up = Math.min(up, MAX_NUM);
