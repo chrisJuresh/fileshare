@@ -1,16 +1,15 @@
 // HTTP webseed (BEP19) — GET/HEAD /ws/:token/<torrent_name>/<file path> (docs/ARCHITECTURE.md §7.1, §9).
 // Token + share state are checked on every request; the path must name a file in the share's file
 // list; the file is resolved under the library with safeJoin + assertNoSymlinks and opened O_NOFOLLOW;
-// bytes go through the shared upload limiter.
+// bytes go through the shared upload limiter. BEP 47 pad files are served as zeros (never on disk).
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { pipeline, Transform, type TransformCallback } from 'node:stream';
+import { pipeline, Readable, Transform, type TransformCallback } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { assertNoSymlinks, safeJoin } from '../core/paths.js';
-import type { FileEntry } from '../types.js';
 import type { Limiter } from './limiter.js';
-import { isPlainSegment } from './metainfo.js';
+import { isPlainSegment, type LayoutFile } from './metainfo.js';
 import type { ShareStore } from './shares.js';
 
 export type RangeResult = { kind: 'full' } | { kind: 'range'; start: number; end: number } | { kind: 'unsatisfiable' };
@@ -60,6 +59,20 @@ export function parseWebseedPath(rawUrl: string): { token: string; segments: str
   return { token, segments };
 }
 
+/** `length` zero bytes, in 64 KiB chunks. */
+export function zeroStream(length: number): Readable {
+  const chunk = Buffer.alloc(64 * 1024);
+  let left = length;
+  return new Readable({
+    read() {
+      if (left <= 0) return void this.push(null);
+      const n = Math.min(left, chunk.length);
+      left -= n;
+      this.push(n === chunk.length ? chunk : chunk.subarray(0, n));
+    },
+  });
+}
+
 class Counter extends Transform {
   constructor(private readonly onBytes: (n: number) => void) {
     super();
@@ -101,7 +114,8 @@ interface InFlight {
 
 export async function registerWebseed(app: FastifyInstance, ctx: AppContext, deps: WebseedDeps): Promise<WebseedControl> {
   const { shares, limiter } = deps;
-  const fileIndex = new Map<string, Map<string, FileEntry>>();
+  /** infohash → path → layout entry (pads included). */
+  const fileIndex = new Map<string, Map<string, LayoutFile>>();
   const idleMs = deps.idleTimeoutMs ?? 60_000;
   /** In-flight body streams, destroyed on shutdown/revoke so nothing keeps streaming without access. */
   const active = new Map<Transform, InFlight>();
@@ -136,16 +150,20 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
     const info = shares.info(share);
     const segs = parsed.segments;
 
-    let entry: FileEntry | undefined;
+    let entry: LayoutFile | undefined;
     let rel: string[];
     if (info.single) {
       // WebTorrent requests the url-list entry as-is for single-file torrents; BEP19 clients append the name.
-      if (segs.length === 0 || (segs.length === 1 && segs[0] === info.name)) entry = info.files[0];
+      if (segs.length === 0 || (segs.length === 1 && segs[0] === info.name)) entry = info.layout[0];
       rel = [];
     } else {
       if (segs.length >= 2 && segs[0] === info.name) {
-        let idx = fileIndex.get(share.id);
-        if (!idx) fileIndex.set(share.id, (idx = new Map(info.files.map((f) => [f.path, f]))));
+        let idx = fileIndex.get(share.info_hash);
+        if (!idx) {
+          // Pad paths may repeat (.pad/<length>); same path means same length, same zeros.
+          fileIndex.set(share.info_hash, (idx = new Map(info.layout.map((f) => [f.path, f]))));
+          if (fileIndex.size > 256) fileIndex.delete(fileIndex.keys().next().value!);
+        }
         entry = idx.get(segs.slice(1).join('/'));
       }
       rel = segs.slice(1);
@@ -154,25 +172,27 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
 
     const item = shares.item(share.item_id);
     if (!item || item.status === 'deleted') return notFound(reply);
-    const lib = ctx.config.paths.library;
-    let full: string;
-    try {
-      full = safeJoin(lib, item.name, ...rel);
-      await assertNoSymlinks(lib, full);
-    } catch {
-      return notFound(reply);
-    }
-    let fh;
-    try {
-      fh = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW);
-    } catch {
-      return notFound(reply);
+    let fh: Awaited<ReturnType<typeof open>> | undefined;
+    if (!entry.pad) {
+      const lib = ctx.config.paths.library;
+      let full: string;
+      try {
+        full = safeJoin(lib, item.name, ...rel);
+        await assertNoSymlinks(lib, full);
+      } catch {
+        return notFound(reply);
+      }
+      try {
+        fh = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch {
+        return notFound(reply);
+      }
     }
     let handedOff = false;
     try {
-      const st = await fh.stat();
-      if (!st.isFile() || st.size !== entry.length) return notFound(reply);
-      const size = st.size;
+      const st = fh ? await fh.stat() : undefined;
+      if (st && (!st.isFile() || st.size !== entry.length)) return notFound(reply);
+      const size = entry.length;
       const range = parseRange(req.headers.range, size);
       const baseName = entry.path.split('/').pop() ?? info.name;
       reply.header('Content-Type', 'application/octet-stream');
@@ -187,7 +207,7 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
       reply.header('Content-Length', String(length));
       if (req.method === 'HEAD' || length === 0) return reply.send();
 
-      const file = fh.createReadStream({ start, end, highWaterMark: 64 * 1024, autoClose: true });
+      const file = fh ? fh.createReadStream({ start, end, highWaterMark: 64 * 1024, autoClose: true }) : zeroStream(length);
       handedOff = true;
       const shareId = share.id;
       const counter = new Counter((n) => {
@@ -209,7 +229,7 @@ export async function registerWebseed(app: FastifyInstance, ctx: AppContext, dep
       res.once('finish', () => res.setTimeout(0));
       return reply.send(counter);
     } finally {
-      if (!handedOff) await fh.close().catch(() => {});
+      if (!handedOff) await fh?.close().catch(() => {});
     }
   };
 

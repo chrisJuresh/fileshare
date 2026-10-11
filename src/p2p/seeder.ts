@@ -76,6 +76,7 @@ export interface SeederOptions {
 interface Entry {
   torrent: WtTorrent;
   tokenVersion: number;
+  infoHash: string;
 }
 
 export function internalAnnounceHost(bind: string, port: number): string {
@@ -167,12 +168,12 @@ export class Seeder {
     return [...this.entries.keys()];
   }
 
-  /** Make sure an active share is seeded with its current token version (re-add on change). */
+  /** Make sure an active share is seeded with its current token version and info (re-add on change). */
   async ensure(row: ShareRow): Promise<void> {
     const client = this.client;
     if (!client) return;
     const cur = this.entries.get(row.id);
-    if (cur && cur.tokenVersion === row.token_version) return;
+    if (cur && cur.tokenVersion === row.token_version && cur.infoHash === row.info_hash) return;
     if (cur) await this.remove(row.id);
     const token = this.shares.token(row);
     const seg = `${token}~${this.opts.internalSecret}`;
@@ -183,12 +184,13 @@ export class Seeder {
       path: this.shares.seedRoot(shareId),
       skipVerify: true,
       store: ReadOnlyStore,
-      storeOpts: { allowedRoot: this.libraryReal },
+      // BEP 47 pad files are not on disk: the store reads them as zeros.
+      storeOpts: { allowedRoot: this.libraryReal, pads: this.shares.info(row).layout.map((f) => f.pad) },
       storeCacheSlots: 0,
       uploads: this.opts.uploads ?? 64,
       private: true,
     });
-    this.entries.set(shareId, { torrent, tokenVersion: row.token_version });
+    this.entries.set(shareId, { torrent, tokenVersion: row.token_version, infoHash: row.info_hash });
     torrent.on('upload', (n: number) => this.opts.onUpload(shareId, n));
     torrent.on('error', (err: Error) => {
       this.log.warn({ shareId, err: scrub(err?.message) }, 'seed torrent error');

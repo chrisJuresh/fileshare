@@ -5,7 +5,7 @@ export type AppEventMap = {
   'item.status': { itemId: string; status: ItemStatus };
   'item.renamed': { itemId: string; oldName: string; newName: string };
   'item.deleted': { itemId: string };
-  'share.changed': { shareId: string; reason: 'created' | 'updated' | 'revoked' | 'expired' };
+  'share.changed': { shareId: string; reason: 'created' | 'updated' | 'revoked' | 'expired' | 'content' };
   'settings.changed': { key: string };
 };
 

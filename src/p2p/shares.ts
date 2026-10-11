@@ -86,12 +86,12 @@ export class ShareStore {
     return this.db.prepare('SELECT * FROM items WHERE id = ?').get(itemId) as ItemRow | undefined;
   }
 
-  /** Parsed (immutable) share info, cached. */
-  info(row: Pick<ShareRow, 'id' | 'info'>): ParsedInfo {
-    let p = this.infoCache.get(row.id);
+  /** Parsed share info, cached per infohash (it changes when files are added to the item). */
+  info(row: Pick<ShareRow, 'info_hash' | 'info'>): ParsedInfo {
+    let p = this.infoCache.get(row.info_hash);
     if (!p) {
       p = parseInfo(row.info);
-      this.infoCache.set(row.id, p);
+      this.infoCache.set(row.info_hash, p);
     }
     return p;
   }
@@ -345,6 +345,31 @@ export class ShareStore {
       if ((await lstat(p)).isSymbolicLink()) await unlink(p);
     }
     await rmdir(dir);
+  }
+
+  /**
+   * Files were added to the item: give every non-revoked share of it the item's new info (same
+   * share id, token and frozen torrent_name, new infohash). Idempotent. Returns the changed shares
+   * with their previous infohash.
+   */
+  refreshItem(itemId: string): { id: string; oldInfoHash: string }[] {
+    const item = this.item(itemId);
+    if (!item || item.status === 'deleted' || !item.info) return [];
+    const rows = this.db.prepare('SELECT * FROM shares WHERE item_id = ? AND revoked_at IS NULL').all(itemId) as ShareRow[];
+    const changed: { id: string; oldInfoHash: string }[] = [];
+    const now = Date.now();
+    for (const r of rows) {
+      const built = buildShareInfo(item.info, r.torrent_name, r.id);
+      if (built.infoHash === r.info_hash) continue;
+      const files = parseInfo(built.info).files.length;
+      this.db.transaction(() => {
+        this.db.prepare('UPDATE shares SET info = ?, info_hash = ?, updated_at = ? WHERE id = ?').run(built.info, built.infoHash, now, r.id);
+        this.event(r.id, 'updated', { content: 'files_added', files });
+      })();
+      this.infoCache.delete(r.info_hash);
+      changed.push({ id: r.id, oldInfoHash: r.info_hash });
+    }
+    return changed;
   }
 
   async repointItem(itemId: string): Promise<void> {

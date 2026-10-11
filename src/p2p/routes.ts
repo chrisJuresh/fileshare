@@ -3,6 +3,8 @@
 //   POST /api/s/:shareId/unlock    password check (argon2 verify only) → UnlockResponse; records the
 //                                  recipient's self-chosen name (if given) on the `unlocked` event
 //   POST /api/s/:shareId/name      valid token + name → UnlockResponse with that name's recipient token
+//   POST /api/s/:shareId/refresh   valid token → UnlockResponse for the same token (current file list
+//                                  and infohash, e.g. after files were added to the share)
 //   GET  /api/s/:shareId/torrent   .torrent for a valid token
 // All URLs come from PUBLIC_BASE_URL. Client IPs are used in memory for rate limiting only.
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -108,6 +110,19 @@ export async function registerShareApi(app: FastifyInstance, ctx: AppContext, de
     const cur = auth.share;
     if (unlockEvents.first(`${cur.id}\n${name}`, req.ip || 'unknown')) shares.event(cur.id, 'unlocked', { name });
     return reply.send(unlockBody(cur, shares.token(cur, shares.recipientId(cur.id, name))));
+  });
+
+  // Grants nothing new: same token back, with the share's current info. Records no event.
+  app.post<{ Params: { shareId: string }; Body: unknown }>('/api/s/:shareId/refresh', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const b = req.body as { token?: unknown } | undefined | null;
+    if (!b || typeof b !== 'object' || Array.isArray(b) || typeof b.token !== 'string' || b.token.length > 512) {
+      return reply.code(400).send({ error: 'bad_request' });
+    }
+    const auth = shares.authorize(b.token);
+    if (!auth.ok) return auth.reason === 'gone' ? gone(reply) : reply.code(401).send({ error: 'invalid' });
+    if (auth.share.id !== req.params.shareId) return reply.code(401).send({ error: 'invalid' });
+    return reply.send(unlockBody(auth.share, b.token));
   });
 
   function unlockBody(cur: ShareRow, token: string): UnlockResponse {

@@ -3,7 +3,8 @@
 // resolve) and deletes files on `destroy()`. This store:
 //  - opens files read-only (O_NOFOLLOW on the final component),
 //  - requires every file's real path to stay inside `allowedRoot` (the library),
-//  - refuses `put`, and never deletes anything.
+//  - refuses `put`, and never deletes anything,
+//  - reads BEP 47 pad files (`pads[i]`) as zero bytes without touching the disk.
 import { constants, type promises as fsp } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -15,6 +16,7 @@ interface StoreFile {
   path: string;
   length: number;
   offset: number;
+  pad: boolean;
 }
 
 export interface ReadOnlyStoreOpts {
@@ -23,6 +25,8 @@ export interface ReadOnlyStoreOpts {
   length?: number;
   /** Real (resolved) library directory every file must live in. */
   allowedRoot: string;
+  /** Per file (torrent order): true for a BEP 47 pad file. */
+  pads?: boolean[];
 }
 
 export class ReadOnlyStore {
@@ -40,11 +44,12 @@ export class ReadOnlyStore {
     if (!opts.allowedRoot) throw new Error('allowedRoot required');
     this.allowedRoot = opts.allowedRoot;
     const root = path.resolve(opts.path);
+    if (opts.pads && opts.pads.length !== opts.files.length) throw new Error('pads must match files');
     let offset = 0;
-    this.files = opts.files.map((f) => {
+    this.files = opts.files.map((f, i) => {
       const p = path.resolve(root, f.path);
       if (!p.startsWith(root + path.sep)) throw new Error('file path escapes store root');
-      const file = { path: p, length: Number(f.length), offset };
+      const file = { path: p, length: Number(f.length), offset, pad: opts.pads?.[i] === true };
       offset += file.length;
       return file;
     });
@@ -110,6 +115,12 @@ export class ReadOnlyStore {
       }
       const inFile = pos - f.offset;
       const n = Math.min(length - done, f.length - inFile);
+      if (f.pad) {
+        out.fill(0, done, done + n);
+        done += n;
+        i++;
+        continue;
+      }
       const fh = await this.handle(i);
       let got = 0;
       while (got < n) {

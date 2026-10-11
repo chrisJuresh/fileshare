@@ -6,11 +6,20 @@ import { bencode, type BValue } from './vendor.js';
 
 type Dict = { [k: string]: BValue };
 
+export interface LayoutFile extends FileEntry {
+  /** BEP 47 padding file (attr contains "p"): zero bytes, never on disk, never shown. */
+  pad: boolean;
+}
+
 export interface ParsedInfo {
   name: string;
   /** true for a single-file torrent (info.length, no info.files). */
   single: boolean;
+  /** Real files (pad files left out). */
   files: FileEntry[];
+  /** Every entry of the info dict's file list in torrent order, pad files included. */
+  layout: LayoutFile[];
+  /** Bytes of the real files. */
   totalBytes: number;
   pieceLength: number;
 }
@@ -45,19 +54,22 @@ export function parseInfo(info: Uint8Array): ParsedInfo {
   if (!isPlainSegment(name)) throw new Error('info: bad name');
   const pieceLength = int(d['piece length'], 'piece length');
   if (Array.isArray(d.files)) {
-    const files: FileEntry[] = d.files.map((f, i) => {
+    const layout: LayoutFile[] = d.files.map((f, i) => {
       const fd = f as Dict;
       const rawPath = (fd['path.utf-8'] ?? fd.path) as unknown;
       if (!Array.isArray(rawPath) || rawPath.length === 0) throw new Error(`info: file ${i} has no path`);
       const segs = rawPath.map((p) => text(p, 'path'));
       if (!segs.every(isPlainSegment)) throw new Error(`info: file ${i} has a bad path`);
-      return { path: segs.join('/'), length: int(fd.length, 'length') };
+      const pad = fd.attr !== undefined && text(fd.attr, 'attr').includes('p');
+      return { path: segs.join('/'), length: int(fd.length, 'length'), pad };
     });
+    const files = layout.filter((f) => !f.pad).map((f) => ({ path: f.path, length: f.length }));
     const totalBytes = files.reduce((a, f) => a + f.length, 0);
-    return { name, single: false, files, totalBytes, pieceLength };
+    return { name, single: false, files, layout, totalBytes, pieceLength };
   }
   const length = int(d.length, 'length');
-  return { name, single: true, files: [{ path: name, length }], totalBytes: length, pieceLength };
+  const file = { path: name, length };
+  return { name, single: true, files: [file], layout: [{ ...file, pad: false }], totalBytes: length, pieceLength };
 }
 
 export function infoHashOf(info: Uint8Array): string {

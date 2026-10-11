@@ -21,6 +21,9 @@ import { registerWebseed, type WebseedControl } from './webseed.js';
 
 export { P2PError } from './shares.js';
 
+/** Live-socket close code: the share's files changed; the page reloads its info (web/recipient). */
+export const CONTENT_CHANGED_CLOSE = 4409;
+
 export interface UploadLimiter {
   setRate(bytesPerSec: number): void;
   throttle(): Transform;
@@ -36,6 +39,8 @@ export interface P2PService {
   revokeShare(id: string): Promise<void>;
   revokeAllForItem(itemId: string): Promise<void>;
   repointItem(itemId: string): Promise<void>;
+  /** Files were added to the item: re-issue its shares' info and reseed (§4 "add files"). */
+  refreshItemShares(itemId: string): Promise<void>;
   /** Clear the unlock failure counters of a share (admin "reset limits"). */
   resetUnlockLimits(id: string): void;
   getShare(id: string): ShareDto | undefined;
@@ -286,6 +291,17 @@ export class P2P implements P2PService {
 
   async repointItem(itemId: string): Promise<void> {
     await this.shares.repointItem(itemId);
+  }
+
+  async refreshItemShares(itemId: string): Promise<void> {
+    for (const { id, oldInfoHash } of this.shares.refreshItem(itemId)) {
+      // Peers of the old torrent: drop its tracker swarm (their announces are refused from now on,
+      // the infohash no longer matches) and tell open share pages to load the new file list.
+      this.tracker.dropShare(id, oldInfoHash);
+      this.stats.closeShare(id, CONTENT_CHANGED_CLOSE);
+      this.ctx.events.emit('share.changed', { shareId: id, reason: 'content' });
+      await this.reconcile(id);
+    }
   }
 
   resetUnlockLimits(id: string): void {
