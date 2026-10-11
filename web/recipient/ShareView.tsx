@@ -372,8 +372,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
       <section class="panel torrent" aria-labelledby="torrent-h">
         <h2 id="torrent-h">Download with a torrent app</h2>
         <p class="muted">
-          Works in qBittorrent, Transmission or any torrent app, and keeps going after you close this page. Leave it
-          seeding afterwards so others get the files faster.
+          Use a torrent app and keep it open afterwards to reliably speed up downloads for others.
         </p>
         <div class="actions">
           <a class="btn green" href={links.torrentUrl} download={`${info.name}.torrent`}>
@@ -453,7 +452,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
                 </div>
               )}
               {!started && saveMode !== 'none' && (
-                <p class="hint">Use this only if you can't use a torrent app. It stops when you close this tab.</p>
+                <p class="hint">Use this only if you can't use a torrent app. It stops when you close this tab, which also stops sharing with others.</p>
               )}
               {!started && saveMode === 'none' && (
                 <p class="notice">This browser can't save large downloads from this page. Use the direct links below.</p>
