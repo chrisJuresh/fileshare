@@ -58,13 +58,15 @@ export async function launchPeer(index: number, profileRoot: string, o: PeerOpti
     args: ['--disable-features=WebRtcHideLocalIpsWithMdns', ...(o.args ?? [])],
   });
   await context.addInitScript(
-    ({ dir, webseedAfterMs }) => {
+    ({ dir, webseedAfterMs, name }) => {
+      // The page asks for a name before downloading; a remembered one skips that step.
+      localStorage.setItem('fileshare.nick', name);
       (window as unknown as { __fileshareTest: object }).__fileshareTest = {
         ...(typeof webseedAfterMs === 'number' ? { webseedAfterMs } : {}),
         pickDirectory: async () => (await navigator.storage.getDirectory()).getDirectoryHandle(dir, { create: true }),
       };
     },
-    { dir: OUT_DIR, webseedAfterMs: o.webseedAfterMs },
+    { dir: OUT_DIR, webseedAfterMs: o.webseedAfterMs, name: `Synthetic Peer ${index}` },
   );
   if (o.spy) {
     // Serve the same bundle with its default export wrapped so client instances are reachable.

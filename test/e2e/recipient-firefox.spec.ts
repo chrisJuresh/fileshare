@@ -34,7 +34,9 @@ test('per-file save via the service worker and a streamed zip of everything', as
     page.on('pageerror', (e) => console.log('[pageerror]', e.message));
   }
   await page.goto(mock.shareUrl);
-  // No password on this share: the page unlocks by itself.
+  // No password on this share: only the name is asked.
+  await page.getByLabel('Your name').fill('Synthetic Sam');
+  await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
   expect((await hookState(page)).saveMode).toBe('serviceworker');
 

@@ -50,11 +50,16 @@ const hookState = (page: Page): Promise<HookState> =>
 
 async function unlockAndDownload(page: Page, mock: RecipientMock, untick: string | null): Promise<void> {
   await page.goto(mock.shareUrl);
+  // A name is asked first (with the password on a protected link) and goes with the unlock request.
+  await page.getByLabel('Your name').fill('Synthetic Sam');
   if (mock.password) {
     await page.getByLabel('Password').fill(mock.password);
     await page.getByRole('button', { name: 'Open' }).click();
+  } else {
+    await page.getByRole('button', { name: 'Continue' }).click();
   }
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
+  expect(mock.stats.unlockNames.at(-1)).toBe('Synthetic Sam');
   if (untick) {
     const box = page.getByRole('checkbox', { name: untick, exact: true });
     await expect(box).toBeChecked();
@@ -110,12 +115,14 @@ test.describe('P2P from the seeder', () => {
     await expect(page.locator('table.swarm tr.you')).toBeVisible();
     await expect.poll(() => mock.stats.live.some((c) => c.stats?.done === true && c.stats.progress === 1)).toBe(true);
 
-    // Nickname goes to the live socket and is remembered in localStorage (not the token).
-    await page.getByLabel('Nickname (optional, up to 24 characters)').fill('Synthetic Sam');
-    await page.getByRole('button', { name: 'Set' }).click();
+    // The name goes to the live socket and is remembered in localStorage (not the token); it can be changed.
     await expect.poll(() => mock.stats.live.map((c) => c.nick)).toContain('Synthetic Sam');
     await expect(page.locator('table.swarm tr.you')).toContainText('Synthetic Sam');
-    expect(await page.evaluate(() => localStorage.getItem('fileshare.nick'))).toBe('Synthetic Sam');
+    await page.getByLabel('Your name (up to 24 characters)').fill('Synthetic Alex');
+    await page.getByRole('button', { name: 'Change' }).click();
+    await expect.poll(() => mock.stats.live.map((c) => c.nick)).toContain('Synthetic Alex');
+    await expect(page.locator('table.swarm tr.you')).toContainText('Synthetic Alex');
+    expect(await page.evaluate(() => localStorage.getItem('fileshare.nick'))).toBe('Synthetic Alex');
   });
 
   test('reopening the link after a finished download seeds it again without a click', async ({ page }) => {

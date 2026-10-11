@@ -7,11 +7,11 @@ import type { AppContext } from '../context.js';
 import { NameError, validateSegment } from '../core/paths.js';
 import { isNameTaken } from '../ingest/naming.js';
 import type { ShareRow } from '../db/index.js';
-import type { ShareDto } from '../types.js';
+import type { ShareDto, ShareEventDto, ShareEventType } from '../types.js';
 import { filesFromInfo, getItemRow, listItems } from './dto.js';
 import type { AdminDeps } from './index.js';
 import { KEY_CAP, MAX_CAP_BPS, MIN_CAP_BPS, readSettings, writeCap } from './settings.js';
-import { buildStats, buildStatus } from './stats.js';
+import { buildStats, buildStatus, eventName, parseEventDetail } from './stats.js';
 
 export class HttpError extends Error {
   constructor(
@@ -177,17 +177,10 @@ export async function adminRoutes(api: FastifyInstance, ctx: AppContext, deps: A
     if (!shareRow(ctx, id)) throw new HttpError(404, 'not_found');
     const rows = db
       .prepare('SELECT id, at, type, detail FROM share_events WHERE share_id = ? ORDER BY at DESC, id DESC LIMIT 500')
-      .all(id) as { id: number; at: number; type: string; detail: string | null }[];
-    return rows.map((r) => {
-      let detail: unknown = null;
-      if (r.detail) {
-        try {
-          detail = JSON.parse(r.detail);
-        } catch {
-          detail = null;
-        }
-      }
-      return { id: r.id, at: r.at, type: r.type, detail };
+      .all(id) as { id: number; at: number; type: ShareEventType; detail: string | null }[];
+    return rows.map((r): ShareEventDto => {
+      const detail = parseEventDetail(r.detail);
+      return { id: r.id, at: r.at, type: r.type, name: eventName(detail), detail };
     });
   });
 

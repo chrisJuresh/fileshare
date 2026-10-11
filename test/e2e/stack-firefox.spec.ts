@@ -28,6 +28,7 @@ test('Firefox: per-file save and streamed zip from the real app', async ({ page 
   });
   if (process.env.DEBUG_PAGE) page.on('console', (m) => console.log('[page]', m.type(), m.text()));
   await page.goto(share.url);
+  await page.getByLabel('Your name').fill('Synthetic Sam');
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Open' }).click();
   await expect(page.getByRole('heading', { name: item.name })).toBeVisible();

@@ -57,15 +57,15 @@ test('3 browsers and a torrent client share one capped swarm; live tables; no IP
     for (let i = 0; i < 3; i++) peers.push(await launchPeer(i, profiles, { webseedAfterMs: 600_000 }));
     await Promise.all(peers.map((p) => startDownload(p, share.url, password)));
 
-    // A torrent client joins with the .torrent from the API.
-    const { token } = (await pub<{ token: string }>('POST', `/api/s/${share.id}/unlock`, { password })).body;
+    // A torrent client joins with the .torrent a named recipient got from the page (recipient token).
+    const { token } = (await pub<{ token: string }>('POST', `/api/s/${share.id}/unlock`, { password, name: 'Synthetic Torrent' })).body;
     const torrentRes = await pub('GET', `/api/s/${share.id}/torrent?t=${token}`);
     expect(torrentRes.status).toBe(200);
     tc = await startTorrentClient(Buffer.from(torrentRes.text, 'latin1'), path.join(SCRATCH, 'tmp', `tc-${tag}`));
 
-    // The client appears in the recipients' table as "Torrent client".
+    // The client appears in the recipients' table under that recipient's name.
     await expect
-      .poll(() => peers.some((p) => swarmMessages(p).some((m) => m.peers.some((r) => r.kind === 'client' && r.label === 'Torrent client'))), {
+      .poll(() => peers.some((p) => swarmMessages(p).some((m) => m.peers.some((r) => r.kind === 'client' && r.label === 'Synthetic Torrent'))), {
         timeout: 60_000,
       })
       .toBe(true);

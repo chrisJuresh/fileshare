@@ -25,13 +25,38 @@ test('unknown link shows the neutral gone page and reveals nothing', async ({ pa
   await expect(page.getByLabel('Password')).toHaveCount(0);
 });
 
-test('locked share shows only a password form; wrong password and rate limit are handled', async ({ page }) => {
+test('open share asks for a name first and reveals nothing before it', async ({ page }) => {
+  const open = await startRecipientMock({ password: null, seed: false, name: 'Open Synthetic Folder' });
+  try {
+    await page.goto(open.shareUrl);
+    await expect(page.getByRole('heading', { name: "What's your name?" })).toBeVisible();
+    expect(await page.content()).not.toContain(open.name);
+    expect(open.stats.unlockNames).toHaveLength(0);
+    await expect(page.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    await page.getByLabel('Your name').fill('   ');
+    await expect(page.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    await page.getByLabel('Your name').fill('Synthetic Sam');
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    expect(open.stats.unlockNames).toEqual(['Synthetic Sam']);
+    // Remembered on this browser: the next visit goes straight to the files.
+    await page.evaluate(() => sessionStorage.clear());
+    await page.reload();
+    await expect(page.getByRole('heading', { name: open.name })).toBeVisible();
+    expect(open.stats.unlockNames).toEqual(['Synthetic Sam', 'Synthetic Sam']);
+  } finally {
+    await open.close();
+  }
+});
+
+test('locked share shows only a name and password form; wrong password and rate limit are handled', async ({ page }) => {
   const responses: string[] = [];
   page.on('response', async (r) => {
     if (r.url().includes('/api/s/') && r.request().method() === 'GET') responses.push(await r.text().catch(() => ''));
   });
   await page.goto(mock.shareUrl);
-  await expect(page.getByRole('heading', { name: 'Enter the password' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Enter your name and the password' })).toBeVisible();
+  await page.getByLabel('Your name').fill('Synthetic Sam');
   let html = await page.content();
   for (const s of sensitiveStrings(mock)) expect(html).not.toContain(s);
   for (const body of responses) for (const s of sensitiveStrings(mock)) expect(body).not.toContain(s);
@@ -57,6 +82,7 @@ test('locked share shows only a password form; wrong password and rate limit are
 test('token is kept per tab: reload does not re-prompt; never in localStorage or the URL', async ({ page }) => {
   mock.stats.unlockFailures = 0;
   await page.goto(mock.shareUrl);
+  await page.getByLabel('Your name').fill('Synthetic Sam');
   await page.getByLabel('Password').fill('synthetic-pass');
   await page.getByRole('button', { name: 'Open' }).click();
   await expect(page.getByRole('heading', { name: mock.name })).toBeVisible();
@@ -76,6 +102,7 @@ test('revocation mid-download stops and explains', async ({ page }) => {
   const slow = await startRecipientMock({ password: null, seed: false, webseedBps: 20_000 });
   try {
     await page.addInitScript(() => {
+      localStorage.setItem('fileshare.nick', 'Synthetic Sam');
       (window as unknown as { __fileshareTest: object }).__fileshareTest = {
         webseedAfterMs: 500,
         pickDirectory: async () => (await navigator.storage.getDirectory()).getDirectoryHandle('revoke-test', { create: true }),

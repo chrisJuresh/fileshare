@@ -245,6 +245,7 @@ test('a locked share page reveals nothing in the browser before unlock', async (
   });
   await page.goto(share.url);
   await expect(page.getByLabel('Password')).toBeVisible();
+  await page.getByLabel('Your name').fill('Synthetic Sam');
   await page.getByLabel('Password').fill('not-it');
   await page.getByRole('button', { name: 'Open' }).click();
   await expect(page.getByRole('alert')).toBeVisible();

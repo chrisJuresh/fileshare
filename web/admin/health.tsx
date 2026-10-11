@@ -137,6 +137,37 @@ export function Health(props: { active: boolean; live: AdminLiveMsg | null }) {
         )}
       </section>
 
+      <section aria-labelledby="h-activity">
+        <h2 id="h-activity">Recent recipients</h2>
+        {stats.recent.length === 0 ? (
+          <p class="muted">Nobody has opened a link yet.</p>
+        ) : (
+          <div class="table-wrap">
+            <table class="table table-compact">
+              <caption class="sr-only">Who opened links and finished downloads, newest first</caption>
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">What</th>
+                  <th scope="col">Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.recent.map((a, i) => (
+                  <tr key={`${a.at}-${i}`}>
+                    <td title={fmtDate(a.at)}>{fmtRelative(a.at)}</td>
+                    <td>{a.name ?? <span class="muted">no name</span>}</td>
+                    <td>{a.type === 'completed' ? 'Finished downloading' : 'Opened the link'}</td>
+                    <td>{a.itemName}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       <section aria-labelledby="h-snap">
         <h2 id="h-snap">Snapshots</h2>
         <div class="cards">

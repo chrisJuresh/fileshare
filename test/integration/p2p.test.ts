@@ -328,6 +328,46 @@ describe('p2p end-to-end', () => {
     expect(JSON.stringify(events)).not.toMatch(/198\.51|203\.0|127\.0/);
   });
 
+  it('records the recipient name on unlock: sanitised, once per name and client', async () => {
+    const share = await p2p.createShare({ itemId: item.id });
+    const post = (body: unknown) =>
+      fetch(`${base}/api/s/${share.id}/unlock`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await post({ name: '  Synthetic\u0000 Sam ' })).status).toBe(200);
+    expect((await post({ name: 'Synthetic Sam' })).status).toBe(200); // same person reloading: no new event
+    expect((await post({ name: 'Synthetic Alex' })).status).toBe(200); // same IP, another person
+    expect((await post({})).status).toBe(200);
+    expect((await post({ name: 42 })).status).toBe(400);
+    expect((await post({ name: 'x'.repeat(257) })).status).toBe(400);
+    const details = (env.ctx.db.prepare("SELECT detail FROM share_events WHERE share_id = ? AND type = 'unlocked' ORDER BY id").all(share.id) as {
+      detail: string | null;
+    }[]).map((e) => e.detail);
+    expect(details).toEqual(['{"name":"Synthetic Sam"}', '{"name":"Synthetic Alex"}', null]);
+  });
+
+  it('gives a named recipient their own token; its .torrent and magnet carry it to the tracker', async () => {
+    const share = await p2p.createShare({ itemId: item.id });
+    const post = async (body: unknown) =>
+      (await (
+        await fetch(`${base}/api/s/${share.id}/unlock`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      ).json()) as UnlockResponse;
+    const sam = await post({ name: 'Synthetic Sam' });
+    const plain = await post({});
+    expect(sam.token.split('.')).toHaveLength(4);
+    expect(plain.token.split('.')).toHaveLength(3);
+    expect((await post({ name: 'Synthetic Sam' })).token).toBe(sam.token); // same name → same token
+    expect((await post({ name: 'Synthetic Alex' })).token).not.toBe(sam.token);
+    const auth = p2p.shares.authorize(sam.token);
+    expect(auth.ok && auth.recipient?.name).toBe('Synthetic Sam');
+    const t = await parsedTorrentFor(sam);
+    expect(t.announce.every((u: string) => u.includes(`/tr/${sam.token}`))).toBe(true);
+    expect(t.urlList).toEqual([sam.webseed]);
+    expect(sam.magnet).toContain(encodeURIComponent(`/tr/${sam.token}`));
+    // The live socket and webseed accept it like a plain token.
+    expect((await fetch(sam.webseed + encodeURI(`${item.name}/a.bin`))).status).toBe(200);
+    // Names never reach the logs.
+    expect(env.logs.join('')).not.toContain('Synthetic Sam');
+  });
+
   it('never logs or persists tokens or client IPs', async () => {
     const all = env.logs.join('');
     expect(all).not.toMatch(/198\.51\.100|203\.0\.113/);

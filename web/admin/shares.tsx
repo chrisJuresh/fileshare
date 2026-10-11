@@ -1,9 +1,9 @@
 // Shares tab: list, edit, revoke, copy link, and a live swarm table per share.
 import { Fragment } from 'preact';
-import { useState } from 'preact/hooks';
-import type { ShareDto, SwarmSnapshot } from '../../src/types.ts';
+import { useEffect, useState } from 'preact/hooks';
+import type { ShareDto, ShareEventDto, SwarmSnapshot } from '../../src/types.ts';
 import { api, errorMessage } from './api.ts';
-import { fmtBytes, fmtDate, fmtPercent, fmtRate, fmtRelative } from './format.ts';
+import { fmtActivity, fmtBytes, fmtDate, fmtPercent, fmtRate, fmtRelative } from './format.ts';
 import { EditShareDialog } from './share-dialog.tsx';
 import { ConfirmDialog, CopyButton, Progress, useNotify } from './ui.tsx';
 
@@ -47,6 +47,55 @@ function SwarmTable(props: { swarm: SwarmSnapshot | undefined }) {
         {props.swarm.totals.peers} in swarm · from server {fmtBytes(props.swarm.totals.serverBytes)} · between peers{' '}
         {fmtBytes(props.swarm.totals.peerBytes)} · {props.swarm.totals.completed} completed
       </p>
+    </div>
+  );
+}
+
+const ACTIVITY_SHOWN = 50;
+
+/** Who opened the link and who finished downloading, by the names recipients gave. */
+function ShareActivity(props: { shareId: string; refreshKey: number }) {
+  const [events, setEvents] = useState<ShareEventDto[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api<ShareEventDto[]>('GET', `/api/admin/shares/${encodeURIComponent(props.shareId)}/events`).then(
+      (e) => {
+        if (cancelled) return;
+        setEvents(e);
+        setError(null);
+      },
+      (e) => !cancelled && setError(errorMessage(e)),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [props.shareId, props.refreshKey]);
+
+  if (error && !events) return <p class="form-error">{error}</p>;
+  if (!events) return <p class="muted">Loading…</p>;
+  const downloadedBy = [...new Set(events.filter((e) => e.type === 'completed' && e.name).map((e) => e.name as string))];
+  const opened = [...new Set(events.filter((e) => e.type === 'unlocked' && e.name).map((e) => e.name as string))];
+  const shown = events.slice(0, ACTIVITY_SHOWN);
+  return (
+    <div>
+      <dl class="kv">
+        <dt>Downloaded by</dt>
+        <dd>{downloadedBy.length > 0 ? downloadedBy.join(', ') : '–'}</dd>
+        <dt>Opened by</dt>
+        <dd>{opened.length > 0 ? opened.join(', ') : '–'}</dd>
+      </dl>
+      <ul class="activity">
+        {shown.map((e) => (
+          <li key={e.id}>
+            <span class="muted" title={fmtDate(e.at)}>
+              {fmtRelative(e.at)}
+            </span>{' '}
+            {fmtActivity(e)}
+          </li>
+        ))}
+      </ul>
+      {events.length > shown.length && <p class="muted small">Showing the latest {shown.length} of {events.length}.</p>}
     </div>
   );
 }
@@ -191,6 +240,11 @@ export function Shares(props: {
                               )}
                             </dl>
                           </div>
+                          <h3 class="h-small">Activity</h3>
+                          <ShareActivity
+                            shareId={s.id}
+                            refreshKey={s.stats.completedDownloads + (s.stats.lastActivityAt ?? 0) + (live?.peers.length ?? 0)}
+                          />
                         </td>
                       </tr>
                     )}

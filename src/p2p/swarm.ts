@@ -69,6 +69,8 @@ interface AnnouncedPeer {
   lastSeen: number;
   /** Sent a non-`completed` announce (started/update) before: only such a peer can complete. */
   begun: boolean;
+  /** Recipient name from the token it announces with. */
+  name?: string;
 }
 
 interface Pending {
@@ -191,7 +193,7 @@ export class SwarmStats {
     }
   }
 
-  private markCompleted(s: ShareSwarm, peerId: string, kind: 'browser' | 'client'): void {
+  private markCompleted(s: ShareSwarm, peerId: string, kind: 'browser' | 'client', name?: string): void {
     if (s.completed.has(peerId)) return;
     const now = this.now();
     s.completionTimes = s.completionTimes.filter((t) => now - t < HOUR_MS);
@@ -202,7 +204,7 @@ export class SwarmStats {
     s.pending.completed += 1;
     s.pending.lastActivity = this.now();
     try {
-      this.deps.shares.event(s.shareId, 'completed', { kind });
+      this.deps.shares.event(s.shareId, 'completed', name ? { kind, name } : { kind });
     } catch (err) {
       this.log.warn({ err: (err as Error).message }, 'could not record completion');
     }
@@ -222,9 +224,13 @@ export class SwarmStats {
     if (prev) s.announced.delete(a.peerId); // re-insert below: keeps the map ordered oldest-first
     else evictOldest(s.announced, MAX_PEERS_PER_SHARE);
     const begun = prev?.begun === true;
-    s.announced.set(a.peerId, { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now(), begun: begun || (a.event !== 'complete' && a.left > 0) });
+    const peer: AnnouncedPeer = { type: a.type, left: a.left, uploaded: a.uploaded, lastSeen: this.now(), begun: begun || (a.event !== 'complete' && a.left > 0) };
+    if (a.name) peer.name = a.name;
+    s.announced.set(a.peerId, peer);
     this.peerUploaded(s, a.peerId, a.uploaded);
-    if (a.event === 'complete' && begun) this.markCompleted(s, a.peerId, a.type === 'ws' ? 'browser' : 'client');
+    if (a.event === 'complete' && begun) {
+      this.markCompleted(s, a.peerId, a.type === 'ws' ? 'browser' : 'client', s.browsers.get(a.peerId)?.nick ?? a.name);
+    }
     s.pending.lastActivity = this.now();
   }
 
@@ -323,14 +329,16 @@ export class SwarmStats {
     const stats = this.statsDto(shareId);
 
     const current = new Map<string, SwarmPeer>();
-    const label = (peerId: string, kind: 'browser' | 'client', nick?: string): string =>
-      kind === 'client' ? 'Torrent client' : (nick ?? `Friend ${s.n(peerId)}`);
+    // Names: a browser's stats-socket nick (also for its WebRTC wire / tracker rows), else the name
+    // of the recipient token the peer announced with (torrent apps).
+    const label = (peerId: string, kind: 'browser' | 'client'): string =>
+      s.browsers.get(peerId)?.nick ?? s.announced.get(peerId)?.name ?? (kind === 'client' ? 'Torrent client' : `Friend ${s.n(peerId)}`);
 
     for (const b of s.browsers.values()) {
       if (!b.socket) continue;
       current.set(b.peerId, {
         id: `p${s.n(b.peerId)}`,
-        label: label(b.peerId, 'browser', b.nick),
+        label: label(b.peerId, 'browser'),
         kind: 'browser',
         progress: b.progress,
         down: b.down,
@@ -563,7 +571,7 @@ export class SwarmStats {
         peer.uploaded = Math.min(uploaded, MAX_NUM);
         this.peerUploaded(s!, peer.peerId, peer.uploaded);
         // A browser seeding what it downloaded on an earlier visit is not a new download.
-        if (done && !peer.done && resumed !== true) this.markCompleted(s!, peer.peerId, 'browser');
+        if (done && !peer.done && resumed !== true) this.markCompleted(s!, peer.peerId, 'browser', peer.nick);
         peer.done = done;
       } else if (msg.t === 'nick') {
         if (++nickMsgs > 1) return;

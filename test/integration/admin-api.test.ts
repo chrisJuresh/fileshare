@@ -219,7 +219,9 @@ describe('shares', () => {
   it('returns share events', async () => {
     const id = insertShare(h.ctx, insertItem(h.ctx));
     const r = await call('GET', `/api/admin/shares/${id}/events`);
-    expect(r.json()).toEqual([{ id: expect.any(Number), at: expect.any(Number), type: 'created', detail: { by: 'test' } }]);
+    expect(r.json()).toEqual([{ id: expect.any(Number), at: expect.any(Number), type: 'created', name: null, detail: { by: 'test' } }]);
+    h.ctx.db.prepare("INSERT INTO share_events (share_id, at, type, detail) VALUES (?, ?, 'completed', ?)").run(id, Date.now() + 1, '{"kind":"browser","name":"Synthetic Sam"}');
+    expect((await call('GET', `/api/admin/shares/${id}/events`)).json()[0]).toMatchObject({ type: 'completed', name: 'Synthetic Sam' });
     expect((await call('GET', '/api/admin/shares/unknown/events')).statusCode).toBe(404);
   });
 });
@@ -235,6 +237,22 @@ describe('stats, status, settings, snapshots', () => {
     expect(s.totals).toEqual({ serverBytes: 400, peerBytes: 900, savedFraction: 900 / 1300, completedDownloads: 4 });
     expect(s.shares).toHaveLength(2);
     expect(s.shares[0]).toMatchObject({ itemName: 'stats-item', shareId: expect.any(String) });
+  });
+
+  it('lists recent recipient activity with names, newest first', async () => {
+    const id = insertShare(h.ctx, insertItem(h.ctx, { name: 'activity-item' }));
+    const ev = h.ctx.db.prepare('INSERT INTO share_events (share_id, at, type, detail) VALUES (?, ?, ?, ?)');
+    const t = Date.now() + 10_000;
+    ev.run(id, t, 'unlocked', '{"name":"Synthetic Sam"}');
+    ev.run(id, t + 1, 'unlock_failed', null);
+    ev.run(id, t + 2, 'completed', '{"kind":"client"}');
+    ev.run(id, t + 3, 'completed', '{"kind":"browser","name":"Synthetic Sam"}');
+    const s = (await call('GET', '/api/admin/stats')).json() as StatsDto;
+    expect(s.recent.slice(0, 3)).toEqual([
+      { at: t + 3, shareId: id, itemName: 'activity-item', type: 'completed', name: 'Synthetic Sam' },
+      { at: t + 2, shareId: id, itemName: 'activity-item', type: 'completed', name: null },
+      { at: t, shareId: id, itemName: 'activity-item', type: 'unlocked', name: 'Synthetic Sam' },
+    ]);
   });
 
   it('reports status with three disks, restic and syncthing', async () => {
