@@ -281,6 +281,23 @@ p {
   font-size: 0.875rem;
 }
 
+/* Torrent app: the recommended way */
+.panel.torrent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+}
+
+.torrent > .muted {
+  font-size: 0.875rem;
+  max-width: 60ch;
+}
+
+.torrent .actions {
+  margin: 6px 0 2px;
+}
+
 .section {
   display: flex;
   flex-direction: column;
@@ -796,23 +813,6 @@ details[open] > summary::after {
   transform: translateY(1px) rotate(-135deg);
 }
 
-.more > summary {
-  padding: 14px 16px;
-  justify-content: space-between;
-}
-
-.more-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0 16px 16px;
-  font-size: 0.875rem;
-}
-
-.more-body .actions {
-  margin-top: 4px;
-}
-
 .direct {
   display: flex;
   flex-direction: column;
@@ -895,6 +895,19 @@ details[open] > summary::after {
 
   .foot-row .btn {
     width: 100%;
+    height: 40px;
+  }
+
+  .panel.torrent {
+    padding: 16px;
+  }
+
+  .torrent .actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .torrent .actions .btn.primary {
+    flex-basis: 100%;
     height: 40px;
   }
 
