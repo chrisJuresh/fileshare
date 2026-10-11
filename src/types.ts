@@ -9,6 +9,10 @@ export type ItemStatus =
   | 'error'
   | 'deleted';
 
+/** Statuses a share can be created for. The torrent info exists from `snapshotting` on; the snapshot
+ *  wait only gates removal of the PC outbox copy, not sharing. */
+export const SHAREABLE_STATUSES: readonly ItemStatus[] = ['snapshotting', 'ready'];
+
 export interface FileEntry {
   /** Path relative to the torrent root, '/'-separated (for a single-file item: the file name). */
   path: string;

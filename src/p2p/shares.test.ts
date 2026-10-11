@@ -26,11 +26,12 @@ const post = (url: string, body: unknown, headers: Record<string, string> = {}) 
   fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
 describe('shares', () => {
-  it('create: needs a ready item; builds DTO with URL from PUBLIC_BASE_URL; creates seedlink; emits', async () => {
+  it('create: needs a hashed item (snapshotting or ready); builds DTO with URL from PUBLIC_BASE_URL; creates seedlink; emits', async () => {
     await expect(p2p.createShare({ itemId: 'nope' })).rejects.toMatchObject({ statusCode: 404 });
     env.ctx.db.prepare("UPDATE items SET status = 'hashing' WHERE id = ?").run(item.id);
     await expect(p2p.createShare({ itemId: item.id })).rejects.toMatchObject({ statusCode: 409 });
-    env.ctx.db.prepare("UPDATE items SET status = 'ready' WHERE id = ?").run(item.id);
+    // The snapshot wait only gates outbox removal; the torrent info already exists.
+    env.ctx.db.prepare("UPDATE items SET status = 'snapshotting' WHERE id = ?").run(item.id);
     await expect(p2p.createShare({ itemId: item.id, expiresAt: Date.now() - 1 })).rejects.toMatchObject({ statusCode: 400 });
     await expect(p2p.createShare({ itemId: item.id, password: '' })).rejects.toMatchObject({ statusCode: 400 });
 

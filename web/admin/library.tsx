@@ -1,7 +1,7 @@
 // Library tab: items table with inline rename, delete, retry, file list and "Share".
 import { Fragment } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { FileEntry, ItemDto } from '../../src/types.ts';
+import { SHAREABLE_STATUSES, type FileEntry, type ItemDto } from '../../src/types.ts';
 import { api, errorMessage } from './api.ts';
 import { fmtBytes, fmtDate } from './format.ts';
 import { ConfirmDialog, Progress, StatusBadge, useNotify } from './ui.tsx';
@@ -195,7 +195,7 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
                   <td class="hide-sm">{fmtDate(item.createdAt)}</td>
                   <td class="actions-cell">
 <div class="row-actions">
-                    {item.status === 'ready' && (
+                    {SHAREABLE_STATUSES.includes(item.status) && (
                       <button type="button" class="btn btn-small btn-primary" onClick={() => props.onShare(item)}>
                         Share
                       </button>

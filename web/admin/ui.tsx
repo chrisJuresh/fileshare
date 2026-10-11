@@ -103,7 +103,7 @@ const STATUS_HINT: Record<ItemStatus, string> = {
   incoming: 'Arriving from the PC',
   stabilising: 'Waiting until the files stop changing',
   hashing: 'Building the torrent',
-  snapshotting: 'Waiting for a snapshot to cover it',
+  snapshotting: 'Shareable now; waiting for a snapshot to cover it',
   ready: 'Ready to share',
   error: 'Needs attention',
   deleted: 'Deleted',
