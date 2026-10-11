@@ -18,7 +18,10 @@ export function formatSpeed(bps: number): string {
 
 export function formatPercent(p: number): string {
   const v = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0)) * 100;
-  return `${v >= 99.95 && p < 1 ? '99.9' : v.toFixed(v < 10 ? 1 : 0)}%`;
+  if (v === 100) return '100%';
+  // Never round up to 100 % before it is: the last per cent shows one decimal, rounded down.
+  if (v >= 99) return `${(Math.floor(v * 10) / 10).toFixed(1)}%`;
+  return `${v.toFixed(v < 10 ? 1 : 0)}%`;
 }
 
 export function formatEta(seconds: number | null): string {
