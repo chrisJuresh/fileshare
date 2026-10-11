@@ -6,6 +6,8 @@
 //
 // Memory is bounded to one piece buffer: files are read sequentially with readSync into it.
 // Each file must match its expected size and mtime before and after reading; otherwise it fails.
+// A job entry is a file ({path, size, mtimeMs, start?, length?}: `length` bytes from `start`, by
+// default the whole file) or a run of zero bytes ({zeros}: a BEP 47 pad file).
 // Messages: {type:'progress',done,total} | {type:'done',pieces,totalBytes} | {type:'error',message}.
 export const HASH_WORKER_SOURCE = String.raw`
 'use strict';
@@ -15,7 +17,8 @@ const { parentPort, workerData } = require('node:worker_threads');
 
 function run(job) {
   const pieceLength = job.pieceLength;
-  const total = job.files.reduce((s, f) => s + f.size, 0);
+  const span = (f) => (f.zeros !== undefined ? f.zeros : f.length !== undefined ? f.length : f.size);
+  const total = job.files.reduce((s, f) => s + span(f), 0);
   const numPieces = Math.ceil(total / pieceLength);
   const pieces = new Uint8Array(numPieces * 20);
   const buf = Buffer.allocUnsafe(pieceLength);
@@ -31,15 +34,39 @@ function run(job) {
     fill = 0;
   }
 
+  function progress() {
+    const now = Date.now();
+    if (now - lastReport >= 200) {
+      lastReport = now;
+      parentPort.postMessage({ type: 'progress', done, total });
+    }
+  }
+
   for (const f of job.files) {
+    if (f.zeros !== undefined) {
+      let remaining = f.zeros;
+      while (remaining > 0) {
+        const n = Math.min(pieceLength - fill, remaining);
+        buf.fill(0, fill, fill + n);
+        fill += n;
+        remaining -= n;
+        done += n;
+        if (fill === pieceLength) flush();
+        progress();
+      }
+      continue;
+    }
+    const start = f.start || 0;
+    const length = span(f);
+    if (start < 0 || start + length > f.size) throw new Error('bad file range');
     const fd = openSync(f.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const before = fstatSync(fd);
       if (!before.isFile() || before.size !== f.size || before.mtimeMs !== f.mtimeMs) {
         throw new Error('a file changed before hashing');
       }
-      let remaining = f.size;
-      let pos = 0;
+      let remaining = length;
+      let pos = start;
       while (remaining > 0) {
         const want = Math.min(pieceLength - fill, remaining);
         const n = readSync(fd, buf, fill, want, pos);
@@ -49,11 +76,7 @@ function run(job) {
         remaining -= n;
         done += n;
         if (fill === pieceLength) flush();
-        const now = Date.now();
-        if (now - lastReport >= 200) {
-          lastReport = now;
-          parentPort.postMessage({ type: 'progress', done, total });
-        }
+        progress();
       }
       const after = fstatSync(fd);
       if (after.size !== f.size || after.mtimeMs !== f.mtimeMs) throw new Error('a file changed during hashing');

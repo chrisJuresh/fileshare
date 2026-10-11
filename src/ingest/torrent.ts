@@ -143,18 +143,123 @@ export function buildInfoDict(input: { name: string; kind: 'file' | 'dir'; files
   return bencode(info);
 }
 
+// --- appending files to an existing (folder) torrent (docs/ARCHITECTURE.md §4 "add files") ---
+//
+// New files go AFTER the existing ones, starting on a piece boundary: if the old data ends inside a
+// piece, a BEP 47 pad file (attr "p", path .pad/<length>, all zero bytes) fills the rest of that
+// piece. Every old file keeps its offset, and every old full piece keeps its hash, so a torrent app
+// that already holds the old files only re-downloads that one partial last piece (now ending in
+// zeros) plus the new files. Only the old partial piece and the new files are hashed.
+
+/** One entry of an info dict's file list, in torrent order (pad files included). */
+export interface LayoutEntry {
+  segs: string[];
+  length: number;
+  /** BEP 47 padding file: zero bytes, not on disk. */
+  pad: boolean;
+}
+
+export interface AppendPlan {
+  pieceLength: number;
+  /** The old files and pads, in torrent order. */
+  layout: LayoutEntry[];
+  /** Bytes covered by the old info (pads included). */
+  oldLength: number;
+  /** Old pieces that stay as they are (every piece that ends at or before `tailStart`). */
+  keptPieces: Uint8Array;
+  /** Offset of the old partial last piece (= oldLength when the old data ends on a boundary). */
+  tailStart: number;
+  /** Zero bytes between the old data and the first new file. */
+  padLength: number;
+}
+
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+function infoDictOf(info: Uint8Array): Record<string, BValue> {
+  const d = bdecode(info);
+  if (!d || typeof d !== 'object' || Array.isArray(d) || d instanceof Uint8Array) throw new Error('info is not a dict');
+  return d;
+}
+
+function bstr(v: BValue | undefined): string {
+  if (v instanceof Uint8Array) return utf8.decode(v);
+  if (typeof v === 'string') return v;
+  throw new Error('info: expected a string');
+}
+
+export function planAppend(info: Uint8Array): AppendPlan {
+  const d = infoDictOf(info);
+  const pieceLength = d['piece length'];
+  const pieces = d.pieces;
+  if (typeof pieceLength !== 'number' || pieceLength <= 0 || !(pieces instanceof Uint8Array)) throw new Error('info: bad pieces');
+  if (!Array.isArray(d.files)) throw new Error('files can only be added to a folder item');
+  const layout = d.files.map((raw): LayoutEntry => {
+    const f = raw as Record<string, BValue>;
+    const p = f['path.utf-8'] ?? f.path;
+    if (!Array.isArray(p) || p.length === 0 || typeof f.length !== 'number') throw new Error('info: bad file entry');
+    return { segs: p.map((x) => bstr(x)), length: f.length, pad: f.attr !== undefined && bstr(f.attr).includes('p') };
+  });
+  const oldLength = layout.reduce((a, f) => a + f.length, 0);
+  if (pieces.length !== Math.ceil(oldLength / pieceLength) * 20) throw new Error('info: piece count does not match the files');
+  const full = Math.floor(oldLength / pieceLength);
+  const tailStart = full * pieceLength;
+  const tail = oldLength - tailStart;
+  return {
+    pieceLength,
+    layout,
+    oldLength,
+    keptPieces: pieces.slice(0, full * 20),
+    tailStart,
+    padLength: tail === 0 ? 0 : pieceLength - tail,
+  };
+}
+
+/** The parts of old (non-pad) files that lie in the old partial last piece, in order. */
+export function tailRanges(plan: AppendPlan): { segs: string[]; size: number; start: number; length: number }[] {
+  const out: { segs: string[]; size: number; start: number; length: number }[] = [];
+  let offset = 0;
+  for (const f of plan.layout) {
+    const end = offset + f.length;
+    if (end > plan.tailStart && f.length > 0) {
+      // A pad never reaches into the partial piece (pads end on a piece boundary).
+      if (f.pad) throw new Error('info: pad file inside the last piece');
+      const start = Math.max(0, plan.tailStart - offset);
+      out.push({ segs: f.segs, size: f.length, start, length: f.length - start });
+    }
+    offset = end;
+  }
+  return out;
+}
+
+/** The old info dict with a pad (if needed) and `newFiles` appended, and `pieces` replaced. */
+export function buildAppendedInfo(info: Uint8Array, padLength: number, newFiles: InfoFile[], pieces: Uint8Array): Buffer {
+  const d = infoDictOf(info);
+  if (!Array.isArray(d.files)) throw new Error('files can only be added to a folder item');
+  if (newFiles.length === 0) throw new Error('no files to add');
+  const files: BValue[] = [...d.files];
+  if (padLength > 0) files.push({ attr: 'p', length: padLength, path: ['.pad', String(padLength)] });
+  for (const f of newFiles) {
+    if (f.segs.length === 0) throw new Error('added files need a path');
+    files.push({ length: f.length, path: f.segs });
+  }
+  return bencode({ ...d, files, pieces });
+}
+
 export class HashAbortedError extends Error {
   constructor() {
     super('hashing aborted');
   }
 }
 
+/** A hashing input: (part of) a file, checked against its expected size and mtime, or zero bytes. */
+export type HashSource = { path: string; size: number; mtimeMs: number; start?: number; length?: number } | { zeros: number };
+
 /**
  * Hash `files` (absolute paths, in torrent order) into concatenated SHA-1 piece hashes, in a
  * worker thread. `onProgress` receives 0..1. Rejects with HashAbortedError if `signal` aborts.
  */
 export function hashPieces(
-  files: { path: string; size: number; mtimeMs: number }[],
+  files: HashSource[],
   pieceLength: number,
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
