@@ -16,6 +16,8 @@ export interface EngineSnapshot {
   phase: EnginePhase;
   /** 0..1 over the SELECTED files. */
   progress: number;
+  /** 0..1 of the WHOLE share this browser holds (what others can fetch from it; the swarm table). */
+  shareProgress: number;
   selectedBytes: number;
   doneBytes: number;
   down: number;
@@ -335,6 +337,7 @@ export class Engine {
     return {
       phase: this.phase,
       progress: Math.max(0, Math.min(1, progress)),
+      shareProgress: t && !t.destroyed && t.length > 0 ? Math.max(0, Math.min(1, t.downloaded / t.length)) : 0,
       selectedBytes,
       doneBytes,
       down,

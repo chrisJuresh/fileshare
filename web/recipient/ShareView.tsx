@@ -101,7 +101,8 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           stats: () => {
             const s = engine.snapshot();
             return {
-              progress: s.progress,
+              // The swarm table shows how much of the whole share each peer holds, as for torrent apps.
+              progress: s.shareProgress,
               down: s.down,
               up: s.up,
               uploaded: s.uploaded,

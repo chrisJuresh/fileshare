@@ -46,6 +46,7 @@ export interface WtTorrent extends WtEmitter {
   pieces: unknown[];
   bitfield: WtBitField | null;
   pieceLength: number;
+  length: number;
   readonly downloadSpeed: number;
   readonly uploadSpeed: number;
   readonly downloaded: number;

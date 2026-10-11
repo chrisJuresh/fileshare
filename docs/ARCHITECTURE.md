@@ -494,6 +494,8 @@ client → server:
 {"t":"stats","progress":0.42,"down":123456,"up":65432,"uploaded":104857600,"downloaded":2147483648,"done":false}
 {"t":"nick","nick":"Sam"}
 ```
+* `stats.progress` is the fraction of the WHOLE share the browser holds (as for torrent apps and the
+  server row), not of the files it selected; `done` means its selected files are complete.
 * `stats` may carry `"resumed":true`: the browser is seeding what it downloaded on an earlier visit
   (§11), so its `done` is not a new completed download. Any other type for `resumed` drops the
   message.

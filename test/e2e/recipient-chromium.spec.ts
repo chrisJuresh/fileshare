@@ -115,7 +115,8 @@ test.describe('P2P from the seeder', () => {
     await expect(page.getByText(/You've shared .* with friends/)).toBeVisible();
     // Live table shows us.
     await expect(page.locator('table.swarm tr.you')).toBeVisible();
-    await expect.poll(() => mock.stats.live.some((c) => c.stats?.done === true && c.stats.progress === 1)).toBe(true);
+    // Stats progress is of the whole share (the swarm table): one file was skipped, so it stays below 1.
+    await expect.poll(() => mock.stats.live.some((c) => c.stats?.done === true && c.stats.progress > 0 && c.stats.progress < 1)).toBe(true);
 
     // The name goes to the live socket and is remembered in localStorage (not the token); it can be changed.
     await expect.poll(() => mock.stats.live.map((c) => c.nick)).toContain('Synthetic Sam');
