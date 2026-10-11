@@ -67,7 +67,7 @@ export interface RecipientMock {
   token: string;
   infoHash: string;
   files: MockFile[];
-  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[] };
+  stats: { unlockFailures: number; webseedBytes: number; hellos: number; live: MockLiveClient[]; unlockNames: unknown[] };
   /** Makes the share gone and closes live sockets with 4404 (revocation mid-download). */
   revoke(): void;
   close(): Promise<void>;
@@ -137,7 +137,7 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   app.get('/s/:shareId', (_req, reply) => sendStatic(webRoot, 'index.html', reply, { 'Cache-Control': 'no-store' }));
 
   let revoked = false;
-  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [] };
+  const stats: RecipientMock['stats'] = { unlockFailures: 0, webseedBytes: 0, hellos: 0, live: [], unlockNames: [] };
   const isShare = (id: string): boolean => id === shareId && !revoked;
   const tokenOk = (t: string | undefined): boolean => t === token && !revoked;
 
@@ -151,8 +151,9 @@ export async function startRecipientMock(opts: RecipientMockOptions = {}): Promi
   let unlockBody: UnlockResponse | null = null;
   let torrentBuf: Buffer | null = null;
 
-  app.post<{ Params: { id: string }; Body: { password?: unknown } }>('/api/s/:id/unlock', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { password?: unknown; name?: unknown } }>('/api/s/:id/unlock', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
+    stats.unlockNames.push(req.body?.name);
     if (!isShare(req.params.id)) return reply.code(404).send({ error: 'gone' });
     if (stats.unlockFailures >= 5) return reply.code(429).send({ error: 'rate_limited', retryAfter: 30 });
     if (password && req.body?.password !== password) {

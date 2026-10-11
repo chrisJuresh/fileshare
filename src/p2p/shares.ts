@@ -3,11 +3,11 @@ import argon2 from 'argon2';
 import { lstat, mkdir, readdir, readlink, rename, rmdir, symlink, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppContext } from '../context.js';
-import { newShareId, SHARE_ID_RE } from '../core/ids.js';
+import { newRecipientId, newShareId, SHARE_ID_RE } from '../core/ids.js';
 import { safeJoin } from '../core/paths.js';
 import { makeShareToken, verifyShareToken } from '../core/tokens.js';
 import type { ItemRow, ShareRow } from '../db/index.js';
-import type { ShareDto, ShareStatsDto } from '../types.js';
+import type { ShareDto, ShareEventType, ShareStatsDto } from '../types.js';
 import { buildShareInfo, parseInfo, sharePageUrl, type ParsedInfo } from './metainfo.js';
 
 export type ShareState = 'active' | 'expired' | 'revoked';
@@ -28,7 +28,8 @@ export function shareState(row: Pick<ShareRow, 'revoked_at' | 'expires_at'>, now
 }
 
 export type AuthResult =
-  | { ok: true; share: ShareRow }
+  /** `recipient`: the named recipient a recipient token was issued to (absent for plain tokens). */
+  | { ok: true; share: ShareRow; recipient?: { id: string; name: string } }
   /** `invalid`: bad MAC or stale token_version. `gone`: unknown, revoked or expired. */
   | { ok: false; reason: 'invalid' | 'gone' };
 
@@ -40,8 +41,10 @@ export interface ArgonOptions {
 
 const DEFAULT_ARGON: ArgonOptions = { memoryCost: 64 * 1024, timeCost: 3, parallelism: 1 };
 const MAX_PASSWORD_CHARS = 1024;
+/** Named recipients per share; beyond this, unlock hands out plain (unnamed) tokens. */
+export const MAX_RECIPIENTS_PER_SHARE = 1000;
 
-export type ShareEventType = 'created' | 'updated' | 'revoked' | 'expired' | 'unlocked' | 'unlock_failed' | 'completed';
+export type { ShareEventType };
 
 export class ShareStore {
   private readonly infoCache = new Map<string, ParsedInfo>();
@@ -93,8 +96,27 @@ export class ShareStore {
     return p;
   }
 
-  token(row: Pick<ShareRow, 'id' | 'token_version'>): string {
-    return makeShareToken(this.hmacKey(), row.id, row.token_version);
+  /** Plain token, or a recipient token when `recipientId` is given (§9). */
+  token(row: Pick<ShareRow, 'id' | 'token_version'>, recipientId?: string): string {
+    return makeShareToken(this.hmacKey(), row.id, row.token_version, recipientId);
+  }
+
+  /**
+   * The recipient id for (share, name): reused for the same name, created otherwise. Undefined once
+   * the share has MAX_RECIPIENTS_PER_SHARE names (random-name spam can't grow the table without bound).
+   */
+  recipientId(shareId: string, name: string, now = Date.now()): string | undefined {
+    return this.db.transaction(() => {
+      const found = this.db.prepare('SELECT id FROM share_recipients WHERE share_id = ? AND name = ?').get(shareId, name) as
+        | { id: string }
+        | undefined;
+      if (found) return found.id;
+      const { n } = this.db.prepare('SELECT COUNT(*) AS n FROM share_recipients WHERE share_id = ?').get(shareId) as { n: number };
+      if (n >= MAX_RECIPIENTS_PER_SHARE) return undefined;
+      const id = newRecipientId();
+      this.db.prepare('INSERT INTO share_recipients (id, share_id, name, created_at) VALUES (?, ?, ?, ?)').run(id, shareId, name, now);
+      return id;
+    })();
   }
 
   /**
@@ -106,7 +128,12 @@ export class ShareStore {
     const share = this.getRow(parsed.shareId);
     if (!share || shareState(share, now) !== 'active') return { ok: false, reason: 'gone' };
     if (share.token_version !== parsed.tokenVersion) return { ok: false, reason: 'invalid' };
-    return { ok: true, share };
+    if (parsed.recipientId === undefined) return { ok: true, share };
+    const r = this.db.prepare('SELECT name FROM share_recipients WHERE id = ? AND share_id = ?').get(parsed.recipientId, share.id) as
+      | { name: string }
+      | undefined;
+    if (!r) return { ok: false, reason: 'invalid' };
+    return { ok: true, share, recipient: { id: parsed.recipientId, name: r.name } };
   }
 
   toDto(row: ShareRow, stats: ShareStatsDto, now = Date.now()): ShareDto {

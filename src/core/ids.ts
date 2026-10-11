@@ -26,3 +26,10 @@ export function newShareId(): string {
 }
 
 export const SHARE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+
+/** 10 random bytes as lowercase base32 (16 chars) — recipient ids inside recipient share tokens. */
+export function newRecipientId(): string {
+  return newId().slice(0, 16);
+}
+
+export const RECIPIENT_ID_RE = /^[a-z2-7]{16}$/;

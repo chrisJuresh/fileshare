@@ -75,6 +75,36 @@ describe('HTTP tracker', () => {
     expect(p2p.tracker.swarm(b.share.infoHash)).toBeUndefined();
   });
 
+  it('labels a torrent app announcing with a recipient token by that name, and records its completion with it', async () => {
+    const { share } = await newShare();
+    const row = p2p.shares.getRow(share.id)!;
+    const rid = p2p.shares.recipientId(share.id, 'Synthetic Sam')!;
+    expect(p2p.shares.recipientId(share.id, 'Synthetic Sam')).toBe(rid); // one id per (share, name)
+    const token = p2p.shares.token(row, rid);
+    const peerId = '-qB4650-recipient001';
+    expect((await announce(token, share.infoHash, peerId)).body['failure reason']).toBeUndefined();
+    const hexPeer = Buffer.from(peerId).toString('hex');
+    await waitFor(() => p2p.swarm(share.id)?.peers.some((p) => p.label === 'Synthetic Sam' && p.kind === 'client') === true);
+    expect(JSON.stringify(p2p.swarm(share.id))).not.toContain(hexPeer);
+    expect((await announce(token, share.infoHash, peerId, { event: 'completed', left: 0 })).body['failure reason']).toBeUndefined();
+    const ev = env.ctx.db.prepare("SELECT detail FROM share_events WHERE share_id = ? AND type = 'completed'").all(share.id);
+    expect(ev).toEqual([{ detail: '{"kind":"client","name":"Synthetic Sam"}' }]);
+  });
+
+  it('rejects recipient tokens for unknown recipients, other shares, and after a password change', async () => {
+    const a = await newShare();
+    const b = await newShare();
+    const fail = async (p: Promise<{ body: Record<string, unknown> }>) => expect(str((await p).body['failure reason'])).toBe('access denied');
+    const rowA = p2p.shares.getRow(a.share.id)!;
+    await fail(announce(p2p.shares.token(rowA, 'aaaaaaaaaaaaaaaa'), a.share.infoHash, '-qB4650-recipient002')); // valid MAC, no such recipient
+    const ridB = p2p.shares.recipientId(b.share.id, 'Synthetic Alex')!;
+    await fail(announce(p2p.shares.token(rowA, ridB), a.share.infoHash, '-qB4650-recipient003')); // B's recipient on A
+    const tokenA = p2p.shares.token(rowA, p2p.shares.recipientId(a.share.id, 'Synthetic Sam')!);
+    expect((await announce(tokenA, a.share.infoHash, '-qB4650-recipient004')).body['failure reason']).toBeUndefined();
+    await p2p.updateShare(a.share.id, { password: 'synthetic-new' });
+    await fail(announce(tokenA, a.share.infoHash, '-qB4650-recipient004'));
+  });
+
   it('scrape and plain GET of the WS path are 404', async () => {
     const { token } = await newShare();
     expect((await fetch(`${srv.base}/tr/${token}/scrape`)).status).toBe(404);

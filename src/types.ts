@@ -55,6 +55,26 @@ export interface ShareDto {
   stats: ShareStatsDto;
 }
 
+export type ShareEventType = 'created' | 'updated' | 'revoked' | 'expired' | 'unlocked' | 'unlock_failed' | 'completed';
+
+export interface ShareEventDto {
+  id: number;
+  at: number;
+  type: ShareEventType;
+  /** The recipient's self-chosen name (`unlocked`, `completed`), or null if they gave none. */
+  name: string | null;
+  detail: unknown;
+}
+
+/** A recipient opening a link or finishing a download, across all shares (newest first). */
+export interface RecipientActivityDto {
+  at: number;
+  shareId: string;
+  itemName: string;
+  type: 'unlocked' | 'completed';
+  name: string | null;
+}
+
 export interface UnlockResponse {
   token: string;
   infoHash: string;
@@ -141,6 +161,7 @@ export interface StatsDto {
   upload: { capBps: number; capacityBps: number | null; currentBps: number };
   totals: { serverBytes: number; peerBytes: number; savedFraction: number; completedDownloads: number };
   shares: (ShareStatsDto & { shareId: string; itemName: string })[];
+  recent: RecipientActivityDto[];
 }
 
 export interface SettingsDto {

@@ -27,6 +27,8 @@ export interface AnnounceInfo {
   left: number;
   uploaded: number;
   downloaded: number;
+  /** Name of the recipient whose token the peer announces with (recipient tokens, §9). */
+  name?: string;
 }
 
 interface ConnCtx {
@@ -37,6 +39,8 @@ interface ConnCtx {
   isServer: boolean;
   /** Client IP per Fastify's trustProxy rules (HTTP only; memory only). */
   ip?: string;
+  /** Recipient name from a recipient token. */
+  name?: string;
 }
 
 type TrackedSocket = WebSocket & { fsCtx?: ConnCtx; upgradeReq?: unknown; peerId?: string | null };
@@ -148,6 +152,7 @@ export class TrackerService {
       left: Number.isFinite(params.left) ? Math.max(0, params.left) : Number.POSITIVE_INFINITY,
       uploaded: num(params.uploaded),
       downloaded: num(params.downloaded),
+      ...(c.name ? { name: c.name } : {}),
     });
   }
 
@@ -205,7 +210,9 @@ export class TrackerService {
     const { token, isServer } = this.parseTokenSegment(seg);
     const auth = this.shares.authorize(token);
     if (!auth.ok) return { reject: auth.reason };
-    return { shareId: auth.share.id, tokenVersion: auth.share.token_version, token, isServer, ip: normalizeIp(req.ip) };
+    const ctx: ConnCtx = { shareId: auth.share.id, tokenVersion: auth.share.token_version, token, isServer, ip: normalizeIp(req.ip) };
+    if (auth.recipient) ctx.name = auth.recipient.name;
+    return ctx;
   }
 
   async register(app: FastifyInstance): Promise<void> {

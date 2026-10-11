@@ -293,14 +293,16 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
     }
   };
 
-  const onNick = (value: string): void => {
-    const clean = cleanNick(value);
-    setNick(value.slice(0, 24));
-    saveNick(clean);
-  };
+  const onNick = (value: string): void => setNick(value.slice(0, 24));
+  /** A name is required: clearing the field puts the last saved name back. */
   const commitNick = (): void => {
     const clean = cleanNick(nick);
+    if (!clean) {
+      setNick(loadNick());
+      return;
+    }
     setNick(clean);
+    if (clean === loadNick()) return;
     saveNick(clean);
     liveRef.current?.setNick(clean);
   };
@@ -465,7 +467,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
       <SwarmTable swarm={swarm} connected={liveConnected} />
 
       <section class="card" aria-labelledby="nick-h">
-        <h2 id="nick-h">Your name in the list</h2>
+        <h2 id="nick-h">Your name</h2>
         <form
           class="row-form"
           onSubmit={(e) => {
@@ -474,23 +476,23 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           }}
         >
           <label for="nick" class="visually-hidden">
-            Nickname (optional, up to 24 characters)
+            Your name (up to 24 characters)
           </label>
           <input
             id="nick"
             type="text"
             maxLength={24}
-            placeholder="Optional nickname"
             value={nick}
-            autocomplete="nickname"
+            required
+            autocomplete="name"
             onInput={(e) => onNick((e.target as HTMLInputElement).value)}
             onBlur={commitNick}
           />
           <button type="submit" class="btn">
-            Set
+            Change
           </button>
         </form>
-        <p class="muted small">Shown to others downloading this link. Leave empty to appear as "Friend".</p>
+        <p class="muted small">Shown to the person who shared this link and to others downloading it.</p>
       </section>
 
       <details class="card torrent-apps">
@@ -498,6 +500,10 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
         <p>
           If you have a torrent app (like qBittorrent or Transmission), you can download with it instead. Torrent apps
           keep going when this tab is closed and are good for very large downloads.
+        </p>
+        <p class="muted small">
+          The .torrent file and magnet link below are yours: they show your name to the person who shared this link,
+          so please don't pass them on. Send others the page link instead.
         </p>
         <div class="actions">
           <a class="btn" href={info.torrentUrl} download={`${info.name}.torrent`}>

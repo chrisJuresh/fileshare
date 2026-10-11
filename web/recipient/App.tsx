@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { UnlockResponse } from '../../src/types.ts';
-import { clearSession, getShareStatus, loadSession, saveSession, shareIdFromLocation, unlock } from './api.ts';
+import { cleanNick, clearSession, getShareStatus, loadNick, loadSession, saveNick, saveSession, shareIdFromLocation, unlock } from './api.ts';
 import { ShareView } from './ShareView.tsx';
 
 type Screen =
   | { k: 'loading' }
   | { k: 'gone' }
-  | { k: 'locked'; notice?: string }
+  | { k: 'gate'; passwordRequired: boolean; notice?: string }
   | { k: 'error'; message: string }
   | { k: 'share'; info: UnlockResponse }
   | { k: 'revoked'; hadStarted: boolean };
@@ -28,22 +28,24 @@ export function App() {
         setScreen({ k: 'gone' });
         return;
       }
+      // Everyone gives a name before downloading; one remembered from an earlier visit is reused.
+      const name = loadNick();
       const saved = loadSession(shareId);
-      if (saved) {
+      if (saved && name) {
         setScreen({ k: 'share', info: saved });
         return;
       }
-      if (status.status === 'open' && !status.passwordRequired) {
-        const r = await unlock(shareId);
+      if (status.status === 'open' && !status.passwordRequired && name) {
+        const r = await unlock(shareId, name);
         if (r.ok) {
           saveSession(shareId, r.data);
           setScreen({ k: 'share', info: r.data });
         } else if (r.reason === 'gone') setScreen({ k: 'gone' });
-        else if (r.reason === 'bad_password') setScreen({ k: 'locked' });
+        else if (r.reason === 'bad_password') setScreen({ k: 'gate', passwordRequired: true });
         else setScreen({ k: 'error', message: "We couldn't open this link right now." });
         return;
       }
-      setScreen({ k: 'locked' });
+      setScreen({ k: 'gate', passwordRequired: status.passwordRequired });
     } catch {
       setScreen({ k: 'error', message: "We couldn't reach the server. Check your connection and try again." });
     }
@@ -62,9 +64,10 @@ export function App() {
       {screen.k === 'loading' && <Loading />}
       {screen.k === 'gone' && <Gone />}
       {screen.k === 'error' && <ErrorScreen message={screen.message} onRetry={() => void boot()} />}
-      {screen.k === 'locked' && shareId && (
-        <Locked
+      {screen.k === 'gate' && shareId && (
+        <Gate
           shareId={shareId}
+          passwordRequired={screen.passwordRequired}
           notice={screen.notice}
           onUnlocked={(info) => {
             saveSession(shareId, info);
@@ -84,7 +87,7 @@ export function App() {
           }}
           onAccessExpired={() => {
             clearSession(shareId);
-            setScreen({ k: 'locked', notice: 'Your access to this link has changed. Please enter the password again.' });
+            setScreen({ k: 'gate', passwordRequired: true, notice: 'Your access to this link has changed. Please enter the password again.' });
           }}
         />
       )}
@@ -147,7 +150,15 @@ function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => voi
   );
 }
 
-function Locked(props: { shareId: string; notice?: string; onUnlocked: (info: UnlockResponse) => void; onGone: () => void }) {
+/** Asks for the recipient's name (always) and the password (password-protected links) before the files. */
+function Gate(props: {
+  shareId: string;
+  passwordRequired: boolean;
+  notice?: string;
+  onUnlocked: (info: UnlockResponse) => void;
+  onGone: () => void;
+}) {
+  const [name, setName] = useState(loadNick);
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,15 +172,18 @@ function Locked(props: { shareId: string; notice?: string; onUnlocked: (info: Un
   }, [waitUntil]);
 
   const waitLeft = Math.max(0, Math.ceil((waitUntil - now) / 1000));
+  const cleanName = cleanNick(name);
+  const ready = cleanName.length > 0 && (!props.passwordRequired || password.length > 0);
 
   const submit = async (e: Event): Promise<void> => {
     e.preventDefault();
-    if (busy || waitLeft > 0 || !password) return;
+    if (busy || waitLeft > 0 || !ready) return;
     setBusy(true);
     setError(null);
-    const r = await unlock(props.shareId, password);
+    const r = await unlock(props.shareId, cleanName, props.passwordRequired ? password : undefined);
     setBusy(false);
     if (r.ok) {
+      saveNick(cleanName);
       props.onUnlocked(r.data);
       return;
     }
@@ -186,42 +200,63 @@ function Locked(props: { shareId: string; notice?: string; onUnlocked: (info: Un
         props.onGone();
         break;
       default:
-        setError("We couldn't check the password right now. Please try again.");
+        setError(props.passwordRequired ? "We couldn't check the password right now. Please try again." : "We couldn't open this link right now. Please try again.");
     }
   };
 
   return (
     <section class="card narrow">
       <Brand />
-      <h1>Enter the password</h1>
-      <p class="muted">Someone shared files with you. The link is protected with a password.</p>
+      <h1>{props.passwordRequired ? 'Enter your name and the password' : "What's your name?"}</h1>
+      <p class="muted">
+        Someone shared files with you.{props.passwordRequired ? ' The link is protected with a password.' : ''}
+      </p>
       {props.notice && (
         <p class="notice" role="status">
           {props.notice}
         </p>
       )}
       <form onSubmit={(e) => void submit(e)} class="stack">
-        <label for="pw">Password</label>
+        <label for="name">Your name</label>
         <input
-          id="pw"
-          type="password"
-          autocomplete="current-password"
-          value={password}
-          onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
-          aria-invalid={error ? 'true' : undefined}
-          aria-describedby={error ? 'pw-err' : undefined}
-          maxLength={1024}
+          id="name"
+          type="text"
+          autocomplete="name"
+          value={name}
+          onInput={(e) => setName((e.target as HTMLInputElement).value.slice(0, 24))}
+          aria-describedby="name-help"
+          maxLength={24}
           required
-          autofocus
+          autofocus={!name}
         />
+        <p id="name-help" class="muted small">
+          Shown to the person who shared this link and to others downloading it.
+        </p>
+        {props.passwordRequired && (
+          <>
+            <label for="pw">Password</label>
+            <input
+              id="pw"
+              type="password"
+              autocomplete="current-password"
+              value={password}
+              onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
+              aria-invalid={error ? 'true' : undefined}
+              aria-describedby={error ? 'pw-err' : undefined}
+              maxLength={1024}
+              required
+              autofocus={!!name}
+            />
+          </>
+        )}
         {error && (
           <p id="pw-err" class="error" role="alert">
             {error}
             {waitLeft > 0 ? ` Try again in ${waitLeft} s.` : ''}
           </p>
         )}
-        <button type="submit" class="btn primary" disabled={busy || waitLeft > 0 || !password}>
-          {busy ? 'Checking…' : 'Open'}
+        <button type="submit" class="btn primary" disabled={busy || waitLeft > 0 || !ready}>
+          {busy ? (props.passwordRequired ? 'Checking…' : 'Opening…') : props.passwordRequired ? 'Open' : 'Continue'}
         </button>
       </form>
     </section>

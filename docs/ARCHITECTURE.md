@@ -184,9 +184,19 @@ CREATE TABLE share_events (                        -- history; NEVER store IPs o
   at        INTEGER NOT NULL,
   type      TEXT NOT NULL CHECK (type IN
             ('created','updated','revoked','expired','unlocked','unlock_failed','completed')),
-  detail    TEXT                                   -- small JSON, e.g. {"kind":"browser"}
+  detail    TEXT                                   -- small JSON, e.g. {"kind":"browser"}; `unlocked` and
+                                                   -- `completed` carry the recipient's self-chosen
+                                                   -- `name` (sanitised, ≤ 24 chars) when there is one
 );
 CREATE INDEX share_events_share ON share_events(share_id, at);
+
+CREATE TABLE share_recipients (                    -- 006: recipients who gave a name; NEVER IPs
+  id          TEXT PRIMARY KEY,                    -- newRecipientId(): 16 chars base32, part of their token (§9)
+  share_id    TEXT NOT NULL REFERENCES shares(id),
+  name        TEXT NOT NULL,                       -- self-chosen, sanitised (≤ 24 chars)
+  created_at  INTEGER NOT NULL,
+  UNIQUE (share_id, name)                          -- at most 1000 rows per share (MAX_RECIPIENTS_PER_SHARE)
+);
 
 CREATE TABLE upload_batches (
   id          TEXT PRIMARY KEY,                    -- newId()
@@ -383,7 +393,7 @@ Host/port. The admin listener **must not** bind a public interface; `config.ts` 
 | GET | `/sw.min.js` | server | WebTorrent service worker at root scope (`Service-Worker-Allowed: /`) |
 | GET | `/vendor/*` | server | `webtorrent.min.js` (ESM) etc. copied by `build-web.mjs` |
 | GET | `/api/s/:shareId` | p2p | `{status:'locked'|'open'|'gone', passwordRequired:boolean}`. `gone` = unknown, revoked or expired (no distinction). No names. |
-| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string}` → 200 `UnlockResponse` (§7.3) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event is written at most once per (share, client) per 10 min. |
+| POST | `/api/s/:shareId/unlock` | p2p | body `{password?: string, name?: string}` → 200 `UnlockResponse` (§7.3) / 400 `{error:'bad_request'}` (`name` not a string or > 256 chars) / 401 `{error:'bad_password'}` / 404 `{error:'gone'}` / 429 `{error:'rate_limited', retryAfter}`. Rate limit: 5 failures per 10 min per (share, client IP) and 50 failures per hour per share; IPs live in memory only. An `unlocked` share event (detail `{name}` when a name was given, sanitised like nicknames §8) is written at most once per (share, name, client) per 10 min, so several people behind one NAT each get one. |
 | GET | `/api/s/:shareId/torrent?t=<token>` | p2p | `.torrent` (`application/x-bittorrent`, `Content-Disposition: attachment`) |
 | GET | `/tr/:token/announce` | p2p | HTTP tracker announce (torrent clients). `/tr/:token/scrape` → 404. Limited to 60 announces per minute per client IP (429 + bencoded `failure reason: rate limited`; IPs HMAC'd in memory only). |
 | GET (WS) | `/tr/:token` | p2p | WebSocket tracker (browsers). At most 500 sockets per share and 5000 in total; beyond that the socket is closed with 1013. |
@@ -438,8 +448,8 @@ equal to `ADMIN_BASE_URL`.
 | PATCH | `/api/admin/shares/:id` | admin→p2p | `{password?: string|null, expiresAt?: number|null}`. `null` clears; absent = unchanged. Changing the password bumps `token_version`. |
 | POST | `/api/admin/shares/:id/revoke` | admin→p2p | |
 | POST | `/api/admin/shares/:id/reset-limits` | admin→p2p | clears the share's unlock failure counters (per share and per client); 404 for unknown ids |
-| GET | `/api/admin/shares/:id/events` | admin | history |
-| GET | `/api/admin/stats` | admin | `StatsDto`: totals, per share, upload now vs cap, peak swarm |
+| GET | `/api/admin/shares/:id/events` | admin | `ShareEventDto[]` (newest first, ≤ 500): `{id, at, type, name, detail}`; `name` = the recipient's name on `unlocked`/`completed`, else null |
+| GET | `/api/admin/stats` | admin | `StatsDto`: totals, per share, upload now vs cap, peak swarm, `recent` = the last 50 `unlocked`/`completed` events across shares with names |
 | GET | `/api/admin/status` | admin | disks, restic status, Syncthing connection, versions |
 | GET/PUT | `/api/admin/settings` | admin | `{uploadCapBps, uploadCapacityBps}` |
 | POST | `/api/admin/snapshots` | admin | manual snapshot request |
@@ -486,6 +496,14 @@ client → server:
   non-finite or negative.
 * Nicknames are trimmed, have control characters removed, and are ≤ 24 chars. They are rendered
   with `textContent` only.
+* **Names:** the share page asks every recipient for a name before showing the files (with the
+  password on a protected link). It is remembered in `localStorage` (`fileshare.nick`), so a later
+  visit from the same browser skips the question, and can be changed on the share page. The page
+  sends it with `unlock` and as the nick in `hello`/`nick`. The server still treats it as optional
+  (old pages, scripts). The nick labels all of that browser's swarm rows (stats socket, WebRTC wire,
+  tracker announce) and is stored on its `completed` event. Torrent apps are named by the
+  recipient token in their .torrent/magnet (§9); direct webseed downloads are not tracked per
+  person.
 
 server → client (every ~1.5 s, and on change):
 ```jsonc
@@ -524,12 +542,21 @@ server → client (every ~1.5 s, and on change):
   base64url (22 chars).
 * **Share token**: `<shareId>.<tokenVersion>.<mac>`, where
   `mac = base64url(HMAC-SHA256(SHARE_HMAC_KEY, "fileshare/share/v1\n" + shareId + "\n" + tokenVersion))[0..22]`.
+* **Recipient token**: `<shareId>.<tokenVersion>.<recipientId>.<mac>`, where
+  `mac = base64url(HMAC-SHA256(SHARE_HMAC_KEY, "fileshare/share-recipient/v1\n" + shareId + "\n" + tokenVersion + "\n" + recipientId))[0..22]`.
+  `unlock` with a `name` returns one (the `share_recipients` row for (share, name) is reused or
+  created; past the per-share cap, a plain token). Every URL built from it (.torrent announce and
+  url-list, magnet, webseed, live socket) carries it, so the tracker labels a torrent app using that
+  .torrent/magnet with the name and stores it on its `completed` event. The name labels the **link
+  copy**, not the person: whoever is given that .torrent/magnet appears under it.
+* Both kinds:
   - Verify by parsing, recomputing, and comparing with `crypto.timingSafeEqual`.
   - **Then** load the share and require: it exists, `token_version` matches, it is not revoked, and
-    it is not expired.
+    it is not expired. A recipient token also needs its `share_recipients` row for that share
+    (otherwise `invalid`).
   - Tokens carry no expiry of their own; share state is checked on **every** use (unlock is the
     only issuer).
-  - Tokens are path-safe (`[A-Za-z0-9_.-]`).
+  - Tokens are path-safe (`[A-Za-z0-9_.-]`) and at most 80 characters.
 * The tracker `filter` accepts an announce only if the token is valid **and** `info_hash ===
   share.info_hash`.
 * Webseed: the token must be valid, `torrent_name` must match, and the file path must exist in that

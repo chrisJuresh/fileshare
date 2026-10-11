@@ -69,3 +69,27 @@ export function fromLocalInput(v: string): number | null {
   const t = new Date(v).getTime();
   return Number.isFinite(t) ? t : null;
 }
+
+/** One line for a share event, with the recipient's self-chosen name where there is one. */
+export function fmtActivity(e: { type: string; name: string | null; detail?: unknown }): string {
+  const kind = e.detail && typeof e.detail === 'object' ? (e.detail as { kind?: unknown }).kind : undefined;
+  const who = e.name ?? (kind === 'client' ? 'A torrent client' : 'Someone (no name given)');
+  switch (e.type) {
+    case 'unlocked':
+      return `${who} opened the link`;
+    case 'completed':
+      return `${who} finished downloading`;
+    case 'unlock_failed':
+      return 'Wrong password entered';
+    case 'created':
+      return 'Link created';
+    case 'updated':
+      return 'Link changed';
+    case 'revoked':
+      return 'Link revoked';
+    case 'expired':
+      return 'Link expired';
+    default:
+      return e.type;
+  }
+}

@@ -1,6 +1,7 @@
 // Public share API (docs/ARCHITECTURE.md §7.1, §7.3):
 //   GET  /api/s/:shareId           status (unknown / revoked / expired are all `gone`)
-//   POST /api/s/:shareId/unlock    password check (argon2 verify only) → UnlockResponse
+//   POST /api/s/:shareId/unlock    password check (argon2 verify only) → UnlockResponse; records the
+//                                  recipient's self-chosen name (if given) on the `unlocked` event
 //   GET  /api/s/:shareId/torrent   .torrent for a valid token
 // All URLs come from PUBLIC_BASE_URL. Client IPs are used in memory for rate limiting only.
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -9,13 +10,17 @@ import type { ShareStatusResponse, UnlockResponse } from '../types.js';
 import { buildMagnet, buildTorrentFile, shareUrls, torrentContentDisposition } from './metainfo.js';
 import { RecentOnce, Semaphore, UnlockRateLimiter } from './ratelimit.js';
 import { shareState, type ShareStore } from './shares.js';
+import { sanitizeNick } from './swarm.js';
 
 export interface PublicRouteDeps {
   shares: ShareStore;
   unlockLimiter: UnlockRateLimiter;
-  /** One `unlocked` event per (share, client) per 10 min; a reload loop can't flood share_events. */
+  /** One `unlocked` event per (share, name, client) per 10 min; a reload loop can't flood share_events. */
   unlockEvents: RecentOnce;
 }
+
+/** Raw `name` length accepted before sanitising (sanitizeNick keeps ≤ 24 characters). */
+const MAX_NAME_CHARS = 256;
 
 const gone = (reply: FastifyReply) => reply.code(404).send({ error: 'gone' });
 
@@ -36,10 +41,12 @@ export async function registerShareApi(app: FastifyInstance, ctx: AppContext, de
     '/api/s/:shareId/unlock',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
-      const b = req.body as { password?: unknown } | undefined | null;
+      const b = req.body as { password?: unknown; name?: unknown } | undefined | null;
       if (b !== undefined && b !== null && (typeof b !== 'object' || Array.isArray(b))) return reply.code(400).send({ error: 'bad_request' });
       const pw = b?.password;
       if (pw !== undefined && (typeof pw !== 'string' || pw.length > 1024)) return reply.code(400).send({ error: 'bad_request' });
+      if (b?.name !== undefined && (typeof b.name !== 'string' || b.name.length > MAX_NAME_CHARS)) return reply.code(400).send({ error: 'bad_request' });
+      const name = sanitizeNick(b?.name);
       const row = shares.getRow(req.params.shareId);
       if (!row || shareState(row, Date.now()) !== 'active') return gone(reply);
 
@@ -74,8 +81,11 @@ export async function registerShareApi(app: FastifyInstance, ctx: AppContext, de
       // Re-read: the share may have changed while we were hashing.
       const cur = shares.getRow(row.id);
       if (!cur || shareState(cur, Date.now()) !== 'active' || cur.token_version !== row.token_version) return gone(reply);
-      if (unlockEvents.first(cur.id, req.ip || 'unknown')) shares.event(cur.id, 'unlocked');
-      const token = shares.token(cur);
+      // Keyed by name too: several people behind one NAT (an office) each get their own event.
+      if (unlockEvents.first(`${cur.id}\n${name ?? ''}`, req.ip || 'unknown')) shares.event(cur.id, 'unlocked', name ? { name } : undefined);
+      // A named recipient gets a recipient token: the .torrent, magnet and tracker URLs built from it
+      // carry their name to the tracker, so a torrent app using them is labelled too.
+      const token = shares.token(cur, name ? shares.recipientId(cur.id, name) : undefined);
       const urls = shareUrls(ctx.config, cur.id, token);
       const info = shares.info(cur);
       const body: UnlockResponse = {

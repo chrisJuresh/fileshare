@@ -25,7 +25,11 @@ upload once per person.
 **Privacy note:** peer-to-peer means recipients of the same link connect to each other, so their
 IP addresses are visible to the other peers in that swarm (WebRTC connection candidates, tracker
 peer lists for torrent apps). The app itself never stores, logs or displays IP addresses; the share
-page's swarm list shows only nicknames or "Friend N".
+page's swarm list shows only names or "Friend N". The share page asks each recipient for a name
+before downloading. That self-chosen name is shown to the other recipients and in the dashboard, and
+it is stored with the link's activity history (opened / finished downloading). The .torrent file
+and magnet link from the page carry that name too, so a torrent app using them shows up under it —
+including when someone forwards them to another person.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 

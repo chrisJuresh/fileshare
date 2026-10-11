@@ -6,7 +6,7 @@ import { latestRuns, pendingRequestCount } from '../backup/queue.js';
 import type { Config } from '../config.js';
 import type { Db, ShareStatsRow } from '../db/index.js';
 import { getSetting } from '../db/index.js';
-import type { DiskStatus, ResticStatus, StatsDto, StatusDto } from '../types.js';
+import type { DiskStatus, RecipientActivityDto, ResticStatus, StatsDto, StatusDto } from '../types.js';
 import { effectiveCapBps, readSettings } from './settings.js';
 
 export const DISK_WARN_FRACTION = 0.85;
@@ -16,6 +16,36 @@ export const DISK_WARN_FRACTION = 0.85;
 export function savedFraction(peerBytes: number, serverBytes: number): number {
   const total = peerBytes + serverBytes;
   return total > 0 ? peerBytes / total : 0;
+}
+
+/** share_events.detail JSON → object (null when absent or unreadable). */
+export function parseEventDetail(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** The recipient's self-chosen name stored on an `unlocked` / `completed` event, if any. */
+export function eventName(detail: unknown): string | null {
+  const name = detail && typeof detail === 'object' ? (detail as { name?: unknown }).name : undefined;
+  return typeof name === 'string' && name.length > 0 ? name : null;
+}
+
+export const RECENT_ACTIVITY_LIMIT = 50;
+
+export function recentActivity(db: Db, limit = RECENT_ACTIVITY_LIMIT): RecipientActivityDto[] {
+  const rows = db
+    .prepare(
+      `SELECT e.at, e.share_id, e.type, e.detail, i.name AS item_name FROM share_events e
+       JOIN shares s ON s.id = e.share_id JOIN items i ON i.id = s.item_id
+       WHERE e.type IN ('unlocked', 'completed')
+       ORDER BY e.at DESC, e.id DESC LIMIT ?`,
+    )
+    .all(limit) as { at: number; share_id: string; type: 'unlocked' | 'completed'; detail: string | null; item_name: string }[];
+  return rows.map((r) => ({ at: r.at, shareId: r.share_id, itemName: r.item_name, type: r.type, name: eventName(parseEventDetail(r.detail)) }));
 }
 
 export function buildStats(db: Db, currentBps: number): StatsDto {
@@ -49,6 +79,7 @@ export function buildStats(db: Db, currentBps: number): StatsDto {
     upload: { capBps: effectiveCapBps(db), capacityBps: s.uploadCapacityBps, currentBps: Number.isFinite(currentBps) ? currentBps : 0 },
     totals: { serverBytes, peerBytes, savedFraction: savedFraction(peerBytes, serverBytes), completedDownloads },
     shares,
+    recent: recentActivity(db),
   };
 }
 

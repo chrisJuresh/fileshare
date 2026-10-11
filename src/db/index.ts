@@ -51,6 +51,13 @@ export interface ShareStatsRow {
   last_activity_at: number | null;
 }
 
+export interface ShareRecipientRow {
+  id: string;
+  share_id: string;
+  name: string;
+  created_at: number;
+}
+
 export interface BackupRunRow {
   id: number;
   kind: 'backup' | 'forget' | 'check' | 'init';

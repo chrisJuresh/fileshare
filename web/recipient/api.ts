@@ -29,14 +29,15 @@ export type UnlockResult =
   | { ok: false; reason: 'bad_password' | 'gone' | 'error' }
   | { ok: false; reason: 'rate_limited'; retryAfter: number };
 
-export async function unlock(id: string, password?: string): Promise<UnlockResult> {
+/** `name` is the recipient's self-chosen name; the server records it with the share's activity. */
+export async function unlock(id: string, name: string, password?: string): Promise<UnlockResult> {
   let res: Response;
   try {
     res = await fetch(`${base(id)}/unlock`, {
       ...fetchOpts,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(password === undefined ? {} : { password }),
+      body: JSON.stringify(password === undefined ? { name } : { name, password }),
     });
   } catch {
     return { ok: false, reason: 'error' };
@@ -135,7 +136,7 @@ export function clearSession(id: string): void {
   }
 }
 
-// --- nickname (not sensitive; remembered across visits) ---
+// --- name (asked before downloading; remembered across visits on this browser) ---
 const NICK_KEY = 'fileshare.nick';
 
 export function cleanNick(raw: string): string {

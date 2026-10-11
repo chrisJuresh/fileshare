@@ -151,6 +151,19 @@ describe('live stats socket', () => {
     a.ws.close();
   });
 
+  it("records a named browser's completion with its name", async () => {
+    const { share, token } = await newShare();
+    const a = await connect(share.id);
+    a.ws.send(JSON.stringify({ t: 'hello', token, peerId: PEER_A, nick: 'Synthetic Sam' }));
+    await waitFor(() => a.last());
+    await sleep(1000); // fresh rate window
+    a.ws.send(JSON.stringify({ t: 'stats', progress: 1, down: 0, up: 0, uploaded: 0, downloaded: 1, done: true }));
+    await waitFor(() => a.last()?.totals.completed === 1);
+    const ev = env.ctx.db.prepare("SELECT detail FROM share_events WHERE share_id = ? AND type = 'completed'").all(share.id);
+    expect(ev).toEqual([{ detail: '{"kind":"browser","name":"Synthetic Sam"}' }]);
+    a.ws.close();
+  });
+
   it('disconnected peers linger, then disappear', async () => {
     const { share, token } = await newShare();
     const a = await connect(share.id);
