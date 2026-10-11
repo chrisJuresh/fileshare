@@ -371,7 +371,7 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
           <a class="btn green" href={info.magnet}>
             Open magnet link
           </a>
-          <CopyButton text={info.magnet} label="Copy magnet link" className="btn green" />
+          <CopyButton text={info.magnet} label="Copy magnet link" />
         </div>
         <p class="hint">These links carry your name, so don't pass them on. Send others the page link instead.</p>
       </section>
@@ -545,12 +545,12 @@ export function ShareView({ shareId, info, onRevoked, onAccessExpired }: Props) 
   );
 }
 
-function CopyButton({ text, label, className = 'btn' }: { text: string; label: string; className?: string }) {
+function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
-      class={className}
+      class="btn"
       onClick={() => {
         void navigator.clipboard?.writeText(text).then(
           () => {

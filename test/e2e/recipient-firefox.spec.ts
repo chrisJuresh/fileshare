@@ -122,6 +122,7 @@ test('storage check frees stale stores and counts the pieces this share already 
     { staleDir: 'Old share - deadbeef', ownDir: `${mock.name} - ${mock.infoHash.slice(0, 8)}`, stale, own },
   );
 
+  await openBrowserDownload(page);
   await page.getByRole('button', { name: 'Start download' }).click();
   await expect.poll(async () => (await hookState(page)).done, { timeout: 60_000, intervals: [1000] }).toBe(true);
   await expect(page.getByText('Not enough browser storage')).toHaveCount(0);
