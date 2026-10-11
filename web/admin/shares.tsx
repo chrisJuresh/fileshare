@@ -1,7 +1,9 @@
-// Shares tab: list, edit, revoke, copy link, and a live swarm table per share.
+// Shares tab: list, edit, revoke, copy link, a live swarm table per share, and adding library items
+// to a shared folder (drop a dragged library row onto the share, or "Add from library").
 import { Fragment } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import type { ShareDto, ShareEventDto, SwarmSnapshot } from '../../src/types.ts';
+import type { ItemDto, ShareDto, ShareEventDto, SwarmSnapshot } from '../../src/types.ts';
+import { addableItems, canReceiveItems, useItemDrop, type AddItemsRequest } from './add-items.tsx';
 import { api, errorMessage } from './api.ts';
 import { fmtActivity, fmtBytes, fmtDate, fmtPercent, fmtRate, fmtRelative } from './format.ts';
 import { EditShareDialog } from './share-dialog.tsx';
@@ -104,13 +106,17 @@ export function Shares(props: {
   shares: ShareDto[] | null;
   error: string | null;
   swarms: Record<string, SwarmSnapshot>;
+  items: ItemDto[] | null;
   onChanged: () => void;
+  onAddItems: (r: AddItemsRequest) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<ShareDto | null>(null);
   const [revoking, setRevoking] = useState<ShareDto | null>(null);
   const [showInactive, setShowInactive] = useState(false);
   const notify = useNotify();
+  const drop = useItemDrop((targetId, dragged) => props.onAddItems({ targetId, preselect: [dragged] }));
+  const itemById = new Map((props.items ?? []).map((i) => [i.id, i]));
 
   if (props.error) return <p class="form-error" role="alert">{props.error}</p>;
   if (!props.shares) return <p class="muted">Loading…</p>;
@@ -160,9 +166,11 @@ export function Shares(props: {
                 const server = s.stats.serverBytesWebseed + s.stats.serverBytesP2p;
                 const saved = s.stats.peerBytes + server > 0 ? s.stats.peerBytes / (s.stats.peerBytes + server) : null;
                 const open = expanded.has(s.id);
+                const folder = itemById.get(s.itemId);
+                const receives = s.state !== 'revoked' && canReceiveItems(folder);
                 return (
                   <Fragment key={s.id}>
-                    <tr>
+                    <tr class={drop.overKey === s.id ? 'drop-over' : undefined} {...drop.propsFor(s.id, receives ? s.itemId : undefined)}>
                       <td>
                         <button type="button" class="btn-link" aria-expanded={open} onClick={() => toggle(s.id)}>
                           <span aria-hidden="true">{open ? '▾' : '▸'}</span> {s.itemName}
@@ -184,6 +192,16 @@ export function Shares(props: {
                         {s.state !== 'revoked' && (
                           <button type="button" class="btn btn-small" onClick={() => setEditing(s)}>
                             Edit
+                          </button>
+                        )}
+                        {receives && addableItems(props.items ?? [], folder!).length > 0 && (
+                          <button
+                            type="button"
+                            class="btn btn-small"
+                            onClick={() => props.onAddItems({ targetId: s.itemId, preselect: [] })}
+                            aria-label={`Add library items to ${s.itemName}`}
+                          >
+                            Add from library
                           </button>
                         )}
                         {s.state === 'active' && s.hasPassword && (

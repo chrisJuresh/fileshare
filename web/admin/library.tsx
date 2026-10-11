@@ -1,7 +1,9 @@
-// Library tab: items table with inline rename, delete, retry, file list, "Add files" and "Share".
+// Library tab: items table with inline rename, delete, retry, file list, "Add files", "Share", and
+// dragging rows onto a folder row ("Add from library").
 import { Fragment } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { SHAREABLE_STATUSES, type FileEntry, type ItemDto } from '../../src/types.ts';
+import { addableItems, canReceiveItems, dragSource, useItemDrop, type AddItemsRequest } from './add-items.tsx';
 import { api, errorMessage } from './api.ts';
 import { fmtBytes, fmtDate } from './format.ts';
 import { ConfirmDialog, Modal, Progress, StatusBadge, useNotify } from './ui.tsx';
@@ -122,12 +124,25 @@ function AddFilesDialog(props: { item: ItemDto | null; onClose: () => void; onAd
   );
 }
 
-export function Library(props: { items: ItemDto[] | null; error: string | null; onChanged: () => void; onShare: (i: ItemDto) => void }) {
+export function Library(props: {
+  items: ItemDto[] | null;
+  error: string | null;
+  onChanged: () => void;
+  onShare: (i: ItemDto) => void;
+  onAddItems: (r: AddItemsRequest) => void;
+}) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<ItemDto | null>(null);
   const [adding, setAdding] = useState<ItemDto | null>(null);
   const [files, setFiles] = useState<Record<string, FileEntry[] | 'loading' | string>>({});
   const notify = useNotify();
+  const drop = useItemDrop((targetId, dragged) => props.onAddItems({ targetId, preselect: [dragged] }));
+
+  // A folder that is having files or items added gets a new file list: drop the cached one.
+  const hashing = (props.items ?? []).filter((i) => i.status === 'hashing' && files[i.id]).map((i) => i.id);
+  useEffect(() => {
+    if (hashing.length > 0) setFiles((f) => Object.fromEntries(Object.entries(f).filter(([id]) => !hashing.includes(id))));
+  }, [hashing.join(',')]);
 
   const toggleFiles = async (item: ItemDto): Promise<void> => {
     if (files[item.id]) {
@@ -183,7 +198,11 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
           <tbody>
             {props.items.map((item) => (
               <Fragment key={item.id}>
-                <tr>
+                <tr
+                  class={drop.overKey === item.id ? 'drop-over' : undefined}
+                  {...dragSource(item, renaming !== item.id)}
+                  {...drop.propsFor(item.id, canReceiveItems(item) ? item.id : undefined)}
+                >
                   <td class="name-cell">
                     {renaming === item.id ? (
                       <RenameCell
@@ -240,6 +259,16 @@ export function Library(props: { items: ItemDto[] | null; error: string | null; 
                     {item.kind === 'dir' && item.status === 'ready' && (
                       <button type="button" class="btn btn-small" onClick={() => setAdding(item)} aria-label={`Add files to ${item.name}`}>
                         Add files
+                      </button>
+                    )}
+                    {canReceiveItems(item) && addableItems(props.items ?? [], item).length > 0 && (
+                      <button
+                        type="button"
+                        class="btn btn-small"
+                        onClick={() => props.onAddItems({ targetId: item.id, preselect: [] })}
+                        aria-label={`Add library items to ${item.name}`}
+                      >
+                        Add from library
                       </button>
                     )}
                     {item.status === 'error' && (

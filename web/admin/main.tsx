@@ -5,6 +5,7 @@ import './app.css';
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { ItemDto, ShareDto } from '../../src/types.ts';
+import { AddItemsDialog, isItemDrag, type AddItemsRequest } from './add-items.tsx';
 import { api, errorMessage, setAuthProblemHandler } from './api.ts';
 import { Health } from './health.tsx';
 import { Library } from './library.tsx';
@@ -36,6 +37,7 @@ function App() {
   const [shares, setShares] = useState<ShareDto[] | null>(null);
   const [sharesError, setSharesError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<ItemDto | null>(null);
+  const [addingItems, setAddingItems] = useState<AddItemsRequest | null>(null);
   const [authProblem, setAuthProblem] = useState(false);
   const { msg: live, connected } = useLive();
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -141,6 +143,10 @@ function App() {
             class={tab === t.id ? 'tab tab-on' : 'tab'}
             onClick={() => select(t.id)}
             onKeyDown={(e) => onTabKey(e, i)}
+            // Dragging a library row over Library/Shares opens that tab, so it can be dropped on a share.
+            onDragEnter={(e) => {
+              if ((t.id === 'library' || t.id === 'shares') && isItemDrag(e) && tab !== t.id) select(t.id);
+            }}
           >
             {t.label}
             {t.id === 'shares' && activeLinks > 0 && <span class="tab-count">{activeLinks}</span>}
@@ -150,10 +156,17 @@ function App() {
       <main>
         {/* All panels stay mounted so an upload keeps running while you look elsewhere. */}
         <section id="panel-library" role="tabpanel" aria-labelledby="tab-library" hidden={tab !== 'library'}>
-          <Library items={shownItems} error={itemsError} onChanged={reloadAll} onShare={setSharing} />
+          <Library items={shownItems} error={itemsError} onChanged={reloadAll} onShare={setSharing} onAddItems={setAddingItems} />
         </section>
         <section id="panel-shares" role="tabpanel" aria-labelledby="tab-shares" hidden={tab !== 'shares'}>
-          <Shares shares={shares} error={sharesError} swarms={live?.shares ?? {}} onChanged={reloadAll} />
+          <Shares
+            shares={shares}
+            error={sharesError}
+            swarms={live?.shares ?? {}}
+            items={items}
+            onChanged={reloadAll}
+            onAddItems={setAddingItems}
+          />
         </section>
         <section id="panel-upload" role="tabpanel" aria-labelledby="tab-upload" hidden={tab !== 'upload'}>
           <Upload onItemsChanged={() => void loadItems()} />
@@ -166,6 +179,7 @@ function App() {
         </section>
       </main>
       <ShareDialog item={sharing} onClose={() => setSharing(null)} onCreated={() => reloadAll()} />
+      <AddItemsDialog request={addingItems} items={items} onClose={() => setAddingItems(null)} onAdded={reloadAll} />
     </div>
   );
 }

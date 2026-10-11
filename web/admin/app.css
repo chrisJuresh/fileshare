@@ -106,6 +106,10 @@ a { color: var(--accent); }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: 0.6rem 0.75rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
 .table tbody tr:last-child td { border-bottom: 0; }
+.table tbody tr[draggable='true'] { cursor: grab; }
+.table tbody tr.drop-over td { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+.pick-list { border: 1px solid var(--border); border-radius: var(--radius); margin: 0 0 0.75rem; padding: 0.5rem 0.75rem; max-height: 18rem; overflow: auto; display: flex; flex-direction: column; }
+.pick-list legend { padding: 0 0.25rem; font-weight: 600; }
 .table th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); font-weight: 600; background: var(--surface-2); }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .table-compact th, .table-compact td { padding: 0.4rem 0.6rem; }
